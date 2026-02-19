@@ -153,6 +153,14 @@ driver_sources = {
         [ 'drivers/realtek/realtek.c' ],
     'focaltech_moc' :
         [ 'drivers/focaltech_moc/focaltech_moc.c' ],
+    'goodixtls511' :
+        [
+            'drivers/goodixtls/goodix_proto.c',
+            'drivers/goodixtls/goodix.c',
+            'drivers/goodixtls/goodixtls.c',
+            'drivers/goodixtls/goodix5xx.c',
+            'drivers/goodixtls/goodix511.c',
+        ],
 }
 
 helper_sources = {
@@ -163,6 +171,8 @@ helper_sources = {
     'aes3k' :
         [ 'drivers/aes3k.c' ],
     'openssl' :
+        [ ],
+    'goodixtls' :
         [ ],
     'udev' :
         [ ],
@@ -240,6 +250,7 @@ deps = [
 # in the build tree. This silences a build time warning.
 subdir('nbis/include')
 subdir('nbis/libfprint-include')
+subdir('sigfm')
 deps += declare_dependency(include_directories: [
     root_inc,
     include_directories('nbis/include'),
@@ -264,7 +275,7 @@ libfprint_private = static_library('fprint-private',
         libfprint_private_sources,
     ],
     dependencies: deps,
-    link_with: libnbis,
+    link_with: [libnbis, libsigfm],
     install: false)
 
 libfprint_drivers = static_library('fprint-drivers',

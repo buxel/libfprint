@@ -34,3 +34,7 @@ option('installed-tests',
        description: 'Whether to install the installed tests',
        type: 'boolean',
        value: true)
+option('goodixtls',
+       description: 'Enable Goodix TLS sensor support (goodixtls511); requires GnuTLS after Phase 2 porting, currently requires OpenSSL',
+       type: 'feature',
+       value: 'auto')
