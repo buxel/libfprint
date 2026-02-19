@@ -126,7 +126,7 @@ static const FpIdEntry allowlist_id_table[] = {
   { .vid = 0x2541, .pid = 0x0236 },
   { .vid = 0x2541, .pid = 0x9711 },
   { .vid = 0x27c6, .pid = 0x5042 },
-  { .vid = 0x27c6, .pid = 0x5110 },
+  /* 0x5110 removed: now supported by goodixtls511 driver */
   { .vid = 0x27c6, .pid = 0x5117 },
   { .vid = 0x27c6, .pid = 0x5120 },
   { .vid = 0x27c6, .pid = 0x5125 },
