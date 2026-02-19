@@ -386,7 +386,7 @@ fpi_device_add_timeout (FpDevice      *device,
   g_source_attach (&source->source, context);
   g_source_set_callback (&source->source, (GSourceFunc) func, user_data, destroy_notify);
   g_source_set_ready_time (&source->source,
-                           g_source_get_time (&source->source) + interval * (guint64) 1000);
+                           g_get_monotonic_time () + interval * (guint64) 1000);
   priv->sources = g_slist_prepend (priv->sources, source);
   g_source_unref (&source->source);
 
