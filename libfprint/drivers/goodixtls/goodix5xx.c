@@ -464,6 +464,54 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
   goodixtls5xx_decode_frame(raw_frame, len, data);
   linear_subtract_inplace(raw_frame, priv->calibration_img,
                           cls->scan_width * cls->scan_height);
+
+  /* Raw frame dump for offline A/B testing (env-gated, zero cost when unset).
+   * Usage: FP_SAVE_RAW=/path/to/dir ./img-capture finger.pgm
+   * Produces: calibration.bin (once) + raw_NNNN.bin per capture.
+   * Each file is scan_width × scan_height × sizeof(uint16) bytes. */
+  const char *save_dir = g_getenv ("FP_SAVE_RAW");
+  if (save_dir)
+    {
+      int npix = cls->scan_width * cls->scan_height;
+      char path[256];
+
+      /* Save calibration frame once */
+      g_snprintf (path, sizeof (path), "%s/calibration.bin", save_dir);
+      if (!g_file_test (path, G_FILE_TEST_EXISTS))
+        {
+          FILE *cf = fopen (path, "wb");
+          if (cf)
+            {
+              fwrite (priv->calibration_img, sizeof (GoodixTls5xxPix), npix, cf);
+              fclose (cf);
+              fp_dbg ("saved calibration frame to %s (%d pixels)", path, npix);
+            }
+        }
+
+      /* Pick next sequence number: start from the static high-water mark
+       * (fast in single-process loops), then scan forward if files from a
+       * previous run already exist (correct across restarts). */
+      static int seq_hwm = 0;
+      int seq = seq_hwm;
+      for (;;)
+        {
+          g_snprintf (path, sizeof (path), "%s/raw_%04d.bin", save_dir, seq);
+          if (!g_file_test (path, G_FILE_TEST_EXISTS))
+            break;
+          seq++;
+        }
+      seq_hwm = seq + 1;
+
+      /* Save raw frame (post-decode, post-cal-subtract, pre-stretch/unsharp) */
+      FILE *rf = fopen (path, "wb");
+      if (rf)
+        {
+          fwrite (raw_frame, sizeof (GoodixTls5xxPix), npix, rf);
+          fclose (rf);
+          fp_dbg ("saved raw frame to %s (%d pixels)", path, npix);
+        }
+    }
+
   guint8 *squashed = calloc(cls->scan_height * cls->scan_width, 1);
   goodixtls5xx_squash_frame_percentile(raw_frame, squashed,
                                        cls->scan_height * cls->scan_width);
