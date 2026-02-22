@@ -392,10 +392,14 @@ goodixtls5xx_squash_frame_percentile(GoodixTls5xxPix *frame, guint8 *squashed,
 /* -------------------------------------------------------------------------
  * goodixtls5xx_unsharp_mask_inplace:
  *
- * Unsharp mask: out = clip(2 * in − blur(in)) using a 3×3 Gaussian kernel
- * [1,2,1 / 2,4,2 / 1,2,1] / 16.  Sharpens ridge detail after the
- * histogram stretch, increasing BRIEF keypoint reliability.
+ * Unsharp mask: out = clip(boost × in − (boost−1) × blur(in)) using a
+ * 3×3 Gaussian kernel [1,2,1 / 2,4,2 / 1,2,1] / 16.  Sharpens ridge
+ * detail after the histogram stretch, increasing BRIEF descriptor
+ * discriminability.  Windows driver uses boost ≈ 10; we use 4 as a
+ * balance between ridge contrast and noise amplification.
  * ---------------------------------------------------------------------- */
+#define UNSHARP_BOOST 4
+
 static void
 goodixtls5xx_unsharp_mask_inplace(guint8 *img, int w, int h)
 {
@@ -428,7 +432,7 @@ goodixtls5xx_unsharp_mask_inplace(guint8 *img, int w, int h)
 
   for (int i = 0; i < w * h; i++)
     {
-      int v = 2 * (int)img[i] - (int)blurred[i];
+      int v = UNSHARP_BOOST * (int)img[i] - (UNSHARP_BOOST - 1) * (int)blurred[i];
       img[i] = (guint8)CLAMP(v, 0, 255);
     }
 

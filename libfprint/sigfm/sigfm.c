@@ -192,7 +192,7 @@ detect_keypoints(const uint8_t *img, int w, int h, OrbKeypoint *kp_out, int max_
           int is_max = 1;
           for (int dy = -1; dy <= 1 && is_max; dy++)
             for (int dx = -1; dx <= 1 && is_max; dx++)
-              if (!(dx == 0 && dy == 0) && scores[(y + dy) * w + (x + dx)] >= s)
+              if (!(dx == 0 && dy == 0) && scores[(y + dy) * w + (x + dx)] > s)
                 is_max = 0;
           if (is_max)
             {
@@ -256,7 +256,7 @@ hamming_dist(const uint8_t *a, const uint8_t *b)
  * KNN matching (k=2) with Lowe ratio test
  * ---------------------------------------------------------------------- */
 
-#define RATIO_TEST 0.75f
+#define RATIO_TEST 0.90f
 #define MIN_MATCH 5
 
 typedef struct
@@ -440,7 +440,8 @@ sigfm_extract(const SigfmPix *pix, int width, int height)
 {
   init_brief_pattern();
 
-  /* Blur to reduce sensor noise before keypoint detection */
+  /* Blur for stable keypoint detection, but compute descriptors on the
+   * original (unblurred) image to preserve discriminative pixel detail. */
   uint8_t *blurred = malloc((size_t)(width * height));
   if (!blurred)
     return NULL;
@@ -449,18 +450,14 @@ sigfm_extract(const SigfmPix *pix, int width, int height)
   OrbKeypoint raw_kp[MAX_KP];
   int n = detect_keypoints(blurred, width, height, raw_kp, MAX_KP);
 
+  free(blurred);
+
   if (n == 0)
-    {
-      free(blurred);
-      return NULL;
-    }
+    return NULL;
 
   SigfmImgInfo *info = malloc(sizeof(SigfmImgInfo));
   if (!info)
-    {
-      free(blurred);
-      return NULL;
-    }
+    return NULL;
 
   info->n_kp = n;
   info->kp = malloc((size_t)n * sizeof(OrbKeypoint));
@@ -471,16 +468,16 @@ sigfm_extract(const SigfmPix *pix, int width, int height)
       free(info->kp);
       free(info->desc);
       free(info);
-      free(blurred);
       return NULL;
     }
 
   memcpy(info->kp, raw_kp, (size_t)n * sizeof(OrbKeypoint));
 
+  /* Compute BRIEF descriptors on original image — the driver's unsharp
+   * mask has already enhanced ridge contrast; re-blurring would undo it. */
   for (int i = 0; i < n; i++)
-    compute_descriptor(blurred, width, &info->kp[i], info->desc + i * DESC_BYTES);
+    compute_descriptor(pix, width, &info->kp[i], info->desc + i * DESC_BYTES);
 
-  free(blurred);
   return info;
 }
 
