@@ -8,10 +8,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 //
 // Algorithm: FAST-9 corner detection + unsteered BRIEF-256 descriptors.
-// Fingerprint images from the GF511 sensor are presented in a consistent
-// orientation (press sensor), so orientation-steered descriptors are not
-// needed.  The matching and geometric-consistency scorer are identical to
-// the original OpenCV SIFT-based implementation.
+// Geometric verification uses RANSAC rigid-transform estimation with
+// cross-check filtered descriptor matching and inlier counting.
 
 #include "sigfm.h"
 
@@ -256,7 +254,7 @@ hamming_dist(const uint8_t *a, const uint8_t *b)
  * KNN matching (k=2) with Lowe ratio test
  * ---------------------------------------------------------------------- */
 
-#define RATIO_TEST 0.90f
+#define RATIO_TEST 0.85f
 #define MIN_MATCH 5
 
 typedef struct
@@ -290,7 +288,8 @@ knn_match(const SigfmImgInfo *query, const SigfmImgInfo *train, Match *matches_o
             }
         }
 
-      if (best1_idx >= 0 && best2 > 0 && (float)best1 < RATIO_TEST * (float)best2)
+      if (best1_idx >= 0 && best2 > 0 &&
+          (float)best1 < RATIO_TEST * (float)best2)
         {
           matches_out[n].qi = q;
           matches_out[n].ti = best1_idx;
@@ -301,134 +300,259 @@ knn_match(const SigfmImgInfo *query, const SigfmImgInfo *train, Match *matches_o
   return n;
 }
 
-/* -------------------------------------------------------------------------
- * Geometric consistency scorer — identical algorithm to sigfm.cpp
- * ---------------------------------------------------------------------- */
-
-#define LENGTH_MATCH 0.05f
-#define ANGLE_MATCH 0.05f
-
-typedef struct
-{
-  float p1x, p1y, p2x, p2y;
-} MatchPair;
-typedef struct
-{
-  double cos_v, sin_v;
-} AngleEntry;
-
+/* Cross-check filter: keep only matches (q,t) where t→q is also the
+ * best forward match in the reverse direction.  This eliminates many
+ * false descriptor matches and dramatically reduces impostor match
+ * counts, improving RANSAC discriminability.  */
 static int
-geometric_score(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled,
-                const Match *matches, int n_matches)
+cross_check_filter(const SigfmImgInfo *query, const SigfmImgInfo *train,
+                   Match *matches, int n_matches)
 {
-  if (n_matches < MIN_MATCH)
-    return 0;
-
-  /* Build point-pair list (de-duplicate by rounding to integer coords) */
-  MatchPair *mp = malloc((size_t)n_matches * sizeof(MatchPair));
-  if (!mp)
-    return 0;
-
-  int nm = 0;
+  int out = 0;
   for (int i = 0; i < n_matches; i++)
     {
-      MatchPair p = { frame->kp[matches[i].qi].x, frame->kp[matches[i].qi].y,
-                      enrolled->kp[matches[i].ti].x, enrolled->kp[matches[i].ti].y };
-      /* Simple de-duplicate: skip if same integer coords as an earlier entry */
-      int dup = 0;
-      for (int j = 0; j < nm && !dup; j++)
-        if ((int)mp[j].p1x == (int)p.p1x && (int)mp[j].p1y == (int)p.p1y)
-          dup = 1;
-      if (!dup)
-        mp[nm++] = p;
-    }
-
-  if (nm < MIN_MATCH)
-    {
-      free(mp);
-      return 0;
-    }
-
-  /* Build angle table: for each pair of match-pairs, record relative angle */
-  int max_angles = nm * nm;
-  AngleEntry *angles = malloc((size_t)max_angles * sizeof(AngleEntry));
-  if (!angles)
-    {
-      free(mp);
-      return 0;
-    }
-  int na = 0;
-
-  for (int j = 0; j < nm; j++)
-    {
-      for (int k = j + 1; k < nm; k++)
+      /* For train descriptor matches[i].ti, find best match in query */
+      const uint8_t *td = train->desc + matches[i].ti * DESC_BYTES;
+      int best_dist = 256, best_q = -1;
+      for (int q = 0; q < query->n_kp; q++)
         {
-          float v1x = mp[j].p1x - mp[k].p1x;
-          float v1y = mp[j].p1y - mp[k].p1y;
-          float v2x = mp[j].p2x - mp[k].p2x;
-          float v2y = mp[j].p2y - mp[k].p2y;
+          int d = hamming_dist(td, query->desc + q * DESC_BYTES);
+          if (d < best_dist)
+            {
+              best_dist = d;
+              best_q = q;
+            }
+        }
+      /* Keep only if reverse best-match agrees */
+      if (best_q == matches[i].qi)
+        matches[out++] = matches[i];
+    }
+  return out;
+}
 
-          double len1 = sqrt((double)(v1x * v1x + v1y * v1y));
-          double len2 = sqrt((double)(v2x * v2x + v2y * v2y));
+/* -------------------------------------------------------------------------
+ * RANSAC rigid-transform geometric verification
+ *
+ * Estimates a 2D rigid transform (rotation + translation) from randomly
+ * sampled 2-point correspondences and counts inliers.  This cleanly
+ * separates genuine matches (coherent spatial transform → many inliers)
+ * from impostor matches (random scatter → 0-2 inliers).
+ *
+ * Replaces the previous pairwise angle-counting scorer which was O(n⁴)
+ * and produced false agreements from random descriptor correlations.
+ * ---------------------------------------------------------------------- */
 
-          if (len1 < 1e-6 || len2 < 1e-6)
-            continue;
+#define RANSAC_ITERATIONS 200
+#define RANSAC_INLIER_THRESH 2.0f /* pixels */
+#define RANSAC_MIN_DIST_SQ 9.0f   /* reject sample pairs < 3 px apart */
 
-          double lmin = len1 < len2 ? len1 : len2;
-          double lmax = len1 > len2 ? len1 : len2;
-          if (1.0 - lmin / lmax > (double)LENGTH_MATCH)
-            continue;
+/* Simple xorshift32 PRNG — deterministic, no seed dependency on libc */
+static uint32_t
+xorshift32(uint32_t *state)
+{
+  uint32_t x = *state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  *state = x;
+  return x;
+}
 
-          double product = len1 * len2;
-          double dot = (double)(v1x * v2x + v1y * v2y);
-          double cross = (double)(v1x * v2y - v1y * v2x);
+static int
+ransac_score(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled,
+             const Match *matches, int n_matches)
+{
+  if (n_matches < 2)
+    return 0;
 
-          double arg_sin = dot / product;
-          double arg_cos = cross / product;
+  const float eps_sq = RANSAC_INLIER_THRESH * RANSAC_INLIER_THRESH;
+  int best_inliers = 0;
+  float best_cos = 1, best_sin = 0, best_tx = 0, best_ty = 0;
 
-          /* Clamp to [-1,1] to guard against float rounding */
-          if (arg_sin > 1.0)
-            arg_sin = 1.0;
-          if (arg_sin < -1.0)
-            arg_sin = -1.0;
-          if (arg_cos > 1.0)
-            arg_cos = 1.0;
-          if (arg_cos < -1.0)
-            arg_cos = -1.0;
+  /* Seed PRNG from match geometry for deterministic results */
+  uint32_t rng = 2654435761u;
+  for (int i = 0; i < n_matches && i < 8; i++)
+    rng ^= (uint32_t)(matches[i].dist * 31 + matches[i].qi * 97 + matches[i].ti * 53);
+  if (rng == 0)
+    rng = 1;
 
-          angles[na].sin_v = asin(arg_sin);
-          angles[na].cos_v = acos(arg_cos);
-          na++;
+  for (int iter = 0; iter < RANSAC_ITERATIONS; iter++)
+    {
+      /* Pick two distinct matches at random */
+      int i1 = (int)(xorshift32(&rng) % (uint32_t)n_matches);
+      int i2 = (int)(xorshift32(&rng) % (uint32_t)(n_matches - 1));
+      if (i2 >= i1)
+        i2++;
+
+      /* Source (frame) and destination (enrolled) points */
+      float p1x = frame->kp[matches[i1].qi].x;
+      float p1y = frame->kp[matches[i1].qi].y;
+      float p2x = frame->kp[matches[i2].qi].x;
+      float p2y = frame->kp[matches[i2].qi].y;
+
+      float q1x = enrolled->kp[matches[i1].ti].x;
+      float q1y = enrolled->kp[matches[i1].ti].y;
+      float q2x = enrolled->kp[matches[i2].ti].x;
+      float q2y = enrolled->kp[matches[i2].ti].y;
+
+      /* Reject degenerate pairs: source points too close */
+      float dx1 = p2x - p1x;
+      float dy1 = p2y - p1y;
+      float len1_sq = dx1 * dx1 + dy1 * dy1;
+      if (len1_sq < RANSAC_MIN_DIST_SQ)
+        continue;
+
+      /* Estimate rigid transform: rotation + translation
+       * From correspondences p1→q1, p2→q2:
+       *   cos_θ = (dx1·dx2 + dy1·dy2) / len1²
+       *   sin_θ = (dx1·dy2 - dy1·dx2) / len1²
+       *   tx = q1x - (cos_θ·p1x - sin_θ·p1y)
+       *   ty = q1y - (sin_θ·p1x + cos_θ·p1y)
+       */
+      float dx2 = q2x - q1x;
+      float dy2 = q2y - q1y;
+
+      float cos_t = (dx1 * dx2 + dy1 * dy2) / len1_sq;
+      float sin_t = (dx1 * dy2 - dy1 * dx2) / len1_sq;
+
+      /* Reject if estimated scale deviates too far from 1.0
+       * (pure rotation has cos²+sin² = 1; allow ±20% for noise) */
+      float scale_sq = cos_t * cos_t + sin_t * sin_t;
+      if (scale_sq < 0.64f || scale_sq > 1.44f)
+        continue;
+
+      float tx = q1x - (cos_t * p1x - sin_t * p1y);
+      float ty = q1y - (sin_t * p1x + cos_t * p1y);
+
+      /* Count inliers: matches whose transformed position agrees */
+      int inliers = 0;
+      for (int m = 0; m < n_matches; m++)
+        {
+          float px = frame->kp[matches[m].qi].x;
+          float py = frame->kp[matches[m].qi].y;
+          float qx = enrolled->kp[matches[m].ti].x;
+          float qy = enrolled->kp[matches[m].ti].y;
+
+          float pred_x = cos_t * px - sin_t * py + tx;
+          float pred_y = sin_t * px + cos_t * py + ty;
+
+          float ex = pred_x - qx;
+          float ey = pred_y - qy;
+
+          if (ex * ex + ey * ey < eps_sq)
+            inliers++;
+        }
+
+      if (inliers > best_inliers)
+        {
+          best_inliers = inliers;
+          best_cos = cos_t;
+          best_sin = sin_t;
+          best_tx = tx;
+          best_ty = ty;
+          /* Early exit: if most matches are inliers, no need to continue */
+          if (best_inliers >= n_matches - 1)
+            break;
         }
     }
 
-  free(mp);
-
-  if (na < MIN_MATCH)
+  /* Least-squares refinement: re-estimate transform from ALL inliers of
+   * the best RANSAC model, then re-count inliers.  This corrects for the
+   * noise in the 2-point estimate and pulls in near-miss genuine inliers
+   * that were just outside the threshold. */
+  if (best_inliers >= 3)
     {
-      free(angles);
-      return 0;
-    }
-
-  /* Count angle-pairs that agree within ANGLE_MATCH */
-  int count = 0;
-  for (int j = 0; j < na; j++)
-    {
-      for (int k = j + 1; k < na; k++)
+      /* 1. Compute centroids of inlier correspondences */
+      float cx = 0, cy = 0, dx = 0, dy = 0;
+      int ni = 0;
+      for (int m = 0; m < n_matches; m++)
         {
-          double s1 = angles[j].sin_v, s2 = angles[k].sin_v;
-          double c1 = angles[j].cos_v, c2 = angles[k].cos_v;
-          double smin = s1 < s2 ? s1 : s2, smax = s1 > s2 ? s1 : s2;
-          double cmin = c1 < c2 ? c1 : c2, cmax = c1 > c2 ? c1 : c2;
+          float px = frame->kp[matches[m].qi].x;
+          float py = frame->kp[matches[m].qi].y;
+          float qx = enrolled->kp[matches[m].ti].x;
+          float qy = enrolled->kp[matches[m].ti].y;
 
-          if (smax > 1e-9 && cmax > 1e-9 && 1.0 - smin / smax <= (double)ANGLE_MATCH
-              && 1.0 - cmin / cmax <= (double)ANGLE_MATCH)
-            count++;
+          float pred_x = best_cos * px - best_sin * py + best_tx;
+          float pred_y = best_sin * px + best_cos * py + best_ty;
+          float ex = pred_x - qx;
+          float ey = pred_y - qy;
+
+          if (ex * ex + ey * ey < eps_sq)
+            {
+              cx += px;
+              cy += py;
+              dx += qx;
+              dy += qy;
+              ni++;
+            }
+        }
+      cx /= ni;
+      cy /= ni;
+      dx /= ni;
+      dy /= ni;
+
+      /* 2. Compute optimal rotation via cross-covariance */
+      float sum_cos = 0, sum_sin = 0;
+      for (int m = 0; m < n_matches; m++)
+        {
+          float px = frame->kp[matches[m].qi].x;
+          float py = frame->kp[matches[m].qi].y;
+          float qx = enrolled->kp[matches[m].ti].x;
+          float qy = enrolled->kp[matches[m].ti].y;
+
+          float pred_x = best_cos * px - best_sin * py + best_tx;
+          float pred_y = best_sin * px + best_cos * py + best_ty;
+          float ex = pred_x - qx;
+          float ey = pred_y - qy;
+
+          if (ex * ex + ey * ey < eps_sq)
+            {
+              float pcx = px - cx;
+              float pcy = py - cy;
+              float qcx = qx - dx;
+              float qcy = qy - dy;
+              sum_cos += pcx * qcx + pcy * qcy;
+              sum_sin += pcx * qcy - pcy * qcx;
+            }
+        }
+
+      float norm = sqrtf(sum_cos * sum_cos + sum_sin * sum_sin);
+      if (norm > 1e-6f)
+        {
+          float ref_cos = sum_cos / norm;
+          float ref_sin = sum_sin / norm;
+          float ref_tx = dx - (ref_cos * cx - ref_sin * cy);
+          float ref_ty = dy - (ref_sin * cx + ref_cos * cy);
+
+          /* 3. Re-count inliers with refined transform */
+          int refined = 0;
+          for (int m = 0; m < n_matches; m++)
+            {
+              float px = frame->kp[matches[m].qi].x;
+              float py = frame->kp[matches[m].qi].y;
+              float qx = enrolled->kp[matches[m].ti].x;
+              float qy = enrolled->kp[matches[m].ti].y;
+
+              float pred_x = ref_cos * px - ref_sin * py + ref_tx;
+              float pred_y = ref_sin * px + ref_cos * py + ref_ty;
+              float ex = pred_x - qx;
+              float ey = pred_y - qy;
+              if (ex * ex + ey * ey < eps_sq)
+                refined++;
+            }
+          if (refined > best_inliers)
+            {
+              best_inliers = refined;
+              best_cos = ref_cos;
+              best_sin = ref_sin;
+              best_tx = ref_tx;
+              best_ty = ref_ty;
+            }
         }
     }
 
-  free(angles);
-  return count;
+  /* Final score: inlier count (from refined or best model) */
+  return best_inliers;
 }
 
 /* -------------------------------------------------------------------------
@@ -493,13 +617,14 @@ sigfm_match_score(SigfmImgInfo *frame, SigfmImgInfo *enrolled)
     return -1;
 
   int n = knn_match(frame, enrolled, matches, max_m);
+  n = cross_check_filter(frame, enrolled, matches, n);
   if (n < MIN_MATCH)
     {
       free(matches);
       return 0;
     }
 
-  int score = geometric_score(frame, enrolled, matches, n);
+  int score = ransac_score(frame, enrolled, matches, n);
   free(matches);
   return score;
 }

@@ -306,8 +306,7 @@ fpi_device_goodixtls511_class_init(FpiDeviceGoodixTls511Class *class)
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->temp_hot_seconds = -1; /* sensor has no overcurrent risk */
 
-  // TODO
-  img_dev_class->score_threshold = 24;
+  img_dev_class->score_threshold = 6;
   img_dev_class->img_width = GOODIX511_WIDTH;
   img_dev_class->img_height = GOODIX511_HEIGHT;
   img_dev_class->algorithm = FPI_DEVICE_ALGO_SIGFM;
