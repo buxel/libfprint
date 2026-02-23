@@ -18,21 +18,21 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
+#define FP_COMPONENT "goodixtls"
+
+#include "drivers_api.h"
 #include "fpi-log.h"
 #include "fpi-ssm.h"
 #include "fpi-usb-transfer.h"
-#define FP_COMPONENT "goodixtls"
+#include "goodix.h"
+#include "goodix_proto.h"
+#include "goodixtls.h"
 
 #include <gio/gio.h>
 #include <glib.h>
 #include <gusb.h>
 #include <stdio.h>
 #include <string.h>
-
-#include "drivers_api.h"
-#include "goodix.h"
-#include "goodix_proto.h"
-#include "goodixtls.h"
 
 typedef struct
 {

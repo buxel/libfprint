@@ -18,14 +18,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "fpi-print.h"
-#include "sigfm/sigfm.h"
 #define FP_COMPONENT "print"
 #include "fpi-log.h"
 
 #include "fp-print-private.h"
-#include "fpi-device.h"
 #include "fpi-compat.h"
+#include "fpi-device.h"
+#include "fpi-print.h"
 
 /**
  * SECTION: fpi-print
@@ -62,7 +61,7 @@ fpi_print_add_print (FpPrint *print, FpPrint *add)
   if (print->type == FPI_PRINT_NBIS)
     to_add = g_memdup2 (add->prints->pdata[0], sizeof (struct xyt_struct));
   else
-    to_add = sigfm_copy_info (add->prints->pdata[0]);
+    to_add = g_bytes_ref (add->prints->pdata[0]);
 
   g_ptr_array_add (print->prints, to_add);
 }
@@ -92,7 +91,7 @@ fpi_print_set_type (FpPrint     *print,
         print->prints = g_ptr_array_new_with_free_func (g_free);
       else
         print->prints = g_ptr_array_new_with_free_func (
-          (GDestroyNotify) sigfm_free_info);
+          (GDestroyNotify) g_bytes_unref);
     }
   g_object_notify (G_OBJECT (print), "fpi-type");
 }
@@ -211,21 +210,38 @@ fpi_print_add_from_image (FpPrint *print,
 }
 
 /**
- * fpi_print_add_sigfm_data:
+ * fpi_print_add_data:
  * @print: A #FpPrint of type #FPI_PRINT_SIGFM
- * @info: (transfer none): The SIGFM image info to add (will be copied)
+ * @data: (transfer none): Opaque serialized print data (will be ref'd)
  *
- * Adds a copy of @info to @print. The print must already have its type
- * set to #FPI_PRINT_SIGFM.
+ * Adds a reference to @data to @print. The print must already have its
+ * type set to a type that uses opaque data blobs (e.g. #FPI_PRINT_SIGFM).
  */
 void
-fpi_print_add_sigfm_data (FpPrint      *print,
-                          SigfmImgInfo *info)
+fpi_print_add_data (FpPrint *print,
+                    GBytes  *data)
 {
   g_return_if_fail (print->type == FPI_PRINT_SIGFM);
-  g_return_if_fail (info != NULL);
+  g_return_if_fail (data != NULL);
 
-  g_ptr_array_add (print->prints, (void *) sigfm_copy_info (info));
+  g_ptr_array_add (print->prints, g_bytes_ref (data));
+}
+
+/**
+ * fpi_print_get_data_array:
+ * @print: A #FpPrint of type #FPI_PRINT_SIGFM
+ *
+ * Returns the internal array of opaque data blobs (each element is a #GBytes)
+ * for a print that uses opaque data storage.
+ *
+ * Returns: (transfer none) (element-type GBytes): The array of data entries
+ */
+GPtrArray *
+fpi_print_get_data_array (FpPrint *print)
+{
+  g_return_val_if_fail (print->type == FPI_PRINT_SIGFM, NULL);
+
+  return print->prints;
 }
 
 /**
@@ -277,58 +293,6 @@ fpi_print_bz3_match (FpPrint *template, FpPrint *print, gint bz3_threshold, GErr
       fp_dbg ("score %d/%d", score, bz3_threshold);
 
       if (score >= bz3_threshold)
-        return FPI_MATCH_SUCCESS;
-    }
-
-  return FPI_MATCH_FAIL;
-}
-
-/**
- * fpi_print_sigfm_match:
- * @template: A #FpPrint containing one or more prints
- * @print: A newly scanned #FpPrint to test
- * @score_threshold: The SIGFM match threshold
- * @error: Return location for error
- *
- * Match the newly scanned @print (containing exactly one print) against the
- * prints contained in @template which will have been stored during enrollment.
- *
- * Both @template and @print need to be of type #FPI_PRINT_SIGFM for this to
- * work.
- *
- * Returns: Whether the prints match, @error will be set if #FPI_MATCH_ERROR is returned
- */
-FpiMatchResult
-fpi_print_sigfm_match (FpPrint *template, FpPrint *print,
-                       gint score_threshold, GError **error)
-{
-  SigfmImgInfo *against;
-  guint i;
-
-  if (template->type != FPI_PRINT_SIGFM)
-    {
-      *error = fpi_device_error_new_msg (
-        FP_DEVICE_ERROR_NOT_SUPPORTED,
-        "Cannot call sigfm match with non-sigfm print data, type was %d",
-        template->type);
-      return FPI_MATCH_ERROR;
-    }
-
-  against = g_ptr_array_index (print->prints, 0);
-
-  for (i = 0; i < template->prints->len; i++)
-    {
-      SigfmImgInfo *pinfo = g_ptr_array_index (template->prints, i);
-      gint score = sigfm_match_score (pinfo, against);
-
-      if (score < 0)
-        {
-          *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
-                                             "error in sigfm_match_score");
-          return FPI_MATCH_ERROR;
-        }
-      fp_dbg ("sigfm score %d/%d", score, score_threshold);
-      if (score >= score_threshold)
         return FPI_MATCH_SUCCESS;
     }
 

@@ -1,22 +1,24 @@
-// Goodix Tls driver for libfprint
-
-// Copyright (C) 2021 Alexander Meiler <alex.meiler@protonmail.com>
-// Copyright (C) 2021 Matthieu CHARETTE <matthieu.charette@gmail.com>
-// Copyright (C) 2021 Natasha England-Elbro <ashenglandelbro@protonmail.com>
-
-// This library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
-
-// This library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-
-// You should have received a copy of the GNU Lesser General Public
-// License along with this library; if not, write to the Free Software
-// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+/*
+ * Goodix Tls driver for libfprint
+ *
+ * Copyright (C) 2021 Alexander Meiler <alex.meiler@protonmail.com>
+ * Copyright (C) 2021 Matthieu CHARETTE <matthieu.charette@gmail.com>
+ * Copyright (C) 2021 Natasha England-Elbro <ashenglandelbro@protonmail.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
 
 #pragma once
 
@@ -68,18 +70,18 @@ struct _FpiDeviceGoodixTls5xxClass
 {
   FpiDeviceGoodixTlsClass parent;
 
-  GoodixTls5xxGetMcuFn get_mcu_cfg; ///< provide the mcu config before fdt commands
+  GoodixTls5xxGetMcuFn get_mcu_cfg; /**< provide the mcu config before fdt commands */
   GoodixTls5xxProcessFrameFn
-      process_frame; ///< process a frame after it is decoded (e.g. crop it)
-  GoodixTls5xxResetStateFn reset_state; ///< callback to reset the state, may be NULL
+      process_frame; /**< process a frame after it is decoded (e.g. crop it) */
+  GoodixTls5xxResetStateFn reset_state; /**< callback to reset the state, may be NULL */
 
-  guint16 scan_width;  ///< width of the raw scanner image
-  guint16 scan_height; ///< height of the raw scanner image
+  guint16 scan_width;  /**< width of the raw scanner image */
+  guint16 scan_height; /**< height of the raw scanner image */
 
   const char
-      *firmware_version; ///< only needed if goodixtls5xx_check_firmware_version() is used
+      *firmware_version; /**< only needed if goodixtls5xx_check_firmware_version() is used */
 
-  int reset_number; ///< only needed if goodixtls5xx_check_reset() is used
+  int reset_number; /**< only needed if goodixtls5xx_check_reset() is used */
 };
 
 /**

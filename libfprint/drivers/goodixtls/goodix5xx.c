@@ -1,33 +1,36 @@
-// Goodix Tls driver for libfprint
+/*
+ * Goodix Tls driver for libfprint
+ *
+ * Copyright (C) 2021 Alexander Meiler <alex.meiler@protonmail.com>
+ * Copyright (C) 2021 Matthieu CHARETTE <matthieu.charette@gmail.com>
+ * Copyright (C) 2021 Natasha England-Elbro <ashenglandelbro@protonmail.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
 
-// Copyright (C) 2021 Alexander Meiler <alex.meiler@protonmail.com>
-// Copyright (C) 2021 Matthieu CHARETTE <matthieu.charette@gmail.com>
-// Copyright (C) 2021 Natasha England-Elbro <ashenglandelbro@protonmail.com>
-
-// This library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
-
-// This library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-
-// You should have received a copy of the GNU Lesser General Public
-// License along with this library; if not, write to the Free Software
-// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
-//
-#include "fp-image-device.h"
-#include "fpi-image-device.h"
-#include "fpi-print.h"
-#include "fpi-ssm.h"
-#include "sigfm/sigfm.h"
 #define FP_COMPONENT "goodixtls5xx"
 
 #include "drivers/goodixtls/goodix5xx.h"
 #include "drivers_api.h"
+#include "fp-image-device.h"
+#include "fpi-image-device.h"
+#include "fpi-print.h"
+#include "fpi-ssm.h"
 #include "goodix.h"
+#include "sigfm/sigfm.h"
+
 #include <math.h>
 #include <stdio.h>
 
@@ -467,52 +470,64 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
   linear_subtract_inplace(raw_frame, priv->calibration_img,
                           cls->scan_width * cls->scan_height);
 
-  /* Raw frame dump for offline A/B testing (env-gated, zero cost when unset).
+  /* Raw frame dump for offline A/B testing (debug builds only, env-gated).
    * Usage: FP_SAVE_RAW=/path/to/dir ./img-capture finger.pgm
    * Produces: calibration.bin (once) + raw_NNNN.bin per capture.
    * Each file is scan_width × scan_height × sizeof(uint16) bytes. */
-  const char *save_dir = g_getenv("FP_SAVE_RAW");
-  if (save_dir)
-    {
-      int npix = cls->scan_width * cls->scan_height;
-      char path[256];
+#ifndef NDEBUG
+  {
+    const char *save_dir = g_getenv ("FP_SAVE_RAW");
 
-      /* Save calibration frame once */
-      g_snprintf(path, sizeof(path), "%s/calibration.bin", save_dir);
-      if (!g_file_test(path, G_FILE_TEST_EXISTS))
+    if (save_dir)
+      {
+        int npix = cls->scan_width * cls->scan_height;
+        char path[256];
+
+        /* Save calibration frame once */
+        g_snprintf (path, sizeof (path), "%s/calibration.bin", save_dir);
+        if (!g_file_test (path, G_FILE_TEST_EXISTS))
+          {
+            FILE *cf = fopen (path, "wb");
+
+            if (cf)
+              {
+                fwrite (priv->calibration_img,
+                        sizeof (GoodixTls5xxPix), npix, cf);
+                fclose (cf);
+                fp_dbg ("saved calibration frame to %s (%d pixels)",
+                        path, npix);
+              }
+          }
+
+        /* Pick next sequence number by scanning for an unused filename. */
         {
-          FILE *cf = fopen(path, "wb");
-          if (cf)
+          int seq = 0;
+
+          for (;;)
             {
-              fwrite(priv->calibration_img, sizeof(GoodixTls5xxPix), npix, cf);
-              fclose(cf);
-              fp_dbg("saved calibration frame to %s (%d pixels)", path, npix);
+              g_snprintf (path, sizeof (path),
+                          "%s/raw_%04d.bin", save_dir, seq);
+              if (!g_file_test (path, G_FILE_TEST_EXISTS))
+                break;
+              seq++;
             }
-        }
 
-      /* Pick next sequence number: start from the static high-water mark
-       * (fast in single-process loops), then scan forward if files from a
-       * previous run already exist (correct across restarts). */
-      static int seq_hwm = 0;
-      int seq = seq_hwm;
-      for (;;)
-        {
-          g_snprintf(path, sizeof(path), "%s/raw_%04d.bin", save_dir, seq);
-          if (!g_file_test(path, G_FILE_TEST_EXISTS))
-            break;
-          seq++;
-        }
-      seq_hwm = seq + 1;
+          /* Save raw frame (post-decode, post-cal-subtract,
+           * pre-stretch/unsharp) */
+          {
+            FILE *rf = fopen (path, "wb");
 
-      /* Save raw frame (post-decode, post-cal-subtract, pre-stretch/unsharp) */
-      FILE *rf = fopen(path, "wb");
-      if (rf)
-        {
-          fwrite(raw_frame, sizeof(GoodixTls5xxPix), npix, rf);
-          fclose(rf);
-          fp_dbg("saved raw frame to %s (%d pixels)", path, npix);
+            if (rf)
+              {
+                fwrite (raw_frame, sizeof (GoodixTls5xxPix), npix, rf);
+                fclose (rf);
+                fp_dbg ("saved raw frame to %s (%d pixels)", path, npix);
+              }
+          }
         }
-    }
+      }
+  }
+#endif /* !NDEBUG */
 
   guint8 *squashed = g_malloc0(cls->scan_height * cls->scan_width);
   goodixtls5xx_squash_frame_percentile(raw_frame, squashed,
@@ -849,7 +864,14 @@ goodix_sigfm_build_print (FpImageDevice  *self,
     }
 
   fpi_print_set_type (print, FPI_PRINT_SIGFM);
-  fpi_print_add_sigfm_data (print, priv->last_sigfm_info);
+
+  {
+    int slen;
+    unsigned char *blob = sigfm_serialize_binary (priv->last_sigfm_info, &slen);
+    g_autoptr(GBytes) data = g_bytes_new_take (blob, slen);
+
+    fpi_print_add_data (print, data);
+  }
 
   return TRUE;
 }
@@ -860,7 +882,72 @@ goodix_sigfm_compare (FpImageDevice *self,
                       FpPrint       *probe,
                       GError       **error)
 {
-  return fpi_print_sigfm_match (enrolled, probe, GOODIX_SIGFM_THRESHOLD, error);
+  GPtrArray *enrolled_prints;
+  GPtrArray *probe_prints;
+  GBytes *probe_bytes;
+  SigfmImgInfo *probe_info;
+  gsize probe_len;
+  const guchar *probe_blob;
+  guint i;
+  FpiMatchResult result = FPI_MATCH_FAIL;
+
+  enrolled_prints = fpi_print_get_data_array (enrolled);
+  probe_prints = fpi_print_get_data_array (probe);
+
+  if (probe_prints->len == 0)
+    {
+      *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                         "Probe print has no data");
+      return FPI_MATCH_ERROR;
+    }
+
+  probe_bytes = g_ptr_array_index (probe_prints, 0);
+  probe_blob = g_bytes_get_data (probe_bytes, &probe_len);
+  probe_info = sigfm_deserialize_binary (probe_blob, probe_len);
+  if (!probe_info)
+    {
+      *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                         "Failed to deserialize probe");
+      return FPI_MATCH_ERROR;
+    }
+
+  for (i = 0; i < enrolled_prints->len; i++)
+    {
+      GBytes *entry = g_ptr_array_index (enrolled_prints, i);
+      gsize elen;
+      const guchar *eblob = g_bytes_get_data (entry, &elen);
+      SigfmImgInfo *einfo = sigfm_deserialize_binary (eblob, elen);
+      gint score;
+
+      if (!einfo)
+        {
+          sigfm_free_info (probe_info);
+          *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                             "Failed to deserialize enrolled");
+          return FPI_MATCH_ERROR;
+        }
+
+      score = sigfm_match_score (einfo, probe_info);
+      sigfm_free_info (einfo);
+
+      if (score < 0)
+        {
+          sigfm_free_info (probe_info);
+          *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                             "Error in sigfm_match_score");
+          return FPI_MATCH_ERROR;
+        }
+
+      fp_dbg ("sigfm score %d/%d", score, GOODIX_SIGFM_THRESHOLD);
+      if (score >= GOODIX_SIGFM_THRESHOLD)
+        {
+          result = FPI_MATCH_SUCCESS;
+          break;
+        }
+    }
+
+  sigfm_free_info (probe_info);
+  return result;
 }
 
 /* ---- End SIGFM vfunc implementations ---- */

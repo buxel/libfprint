@@ -18,7 +18,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "sigfm/sigfm.h"
 #define FP_COMPONENT "print"
 
 #include "fp-print-private.h"
@@ -717,7 +716,6 @@ fp_print_serialize (FpPrint *print,
     }
   else if (print->type == FPI_PRINT_SIGFM)
     {
-      g_autoptr(GPtrArray) to_free = g_ptr_array_new_with_free_func (free);
       GVariantBuilder nested =
         G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE ("(a(ay))"));
       guint i;
@@ -725,15 +723,14 @@ fp_print_serialize (FpPrint *print,
       g_variant_builder_open (&nested, G_VARIANT_TYPE ("a(ay)"));
       for (i = 0; i < print->prints->len; i++)
         {
-          SigfmImgInfo *info = g_ptr_array_index (print->prints, i);
-          int slen;
-          unsigned char *serialized = sigfm_serialize_binary (info, &slen);
+          GBytes *entry = g_ptr_array_index (print->prints, i);
+          gsize slen;
+          const guchar *blob = g_bytes_get_data (entry, &slen);
 
           g_variant_builder_open (&nested, G_VARIANT_TYPE ("(ay)"));
           g_variant_builder_add_value (
             &nested, g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                                serialized, slen, 1));
-          g_ptr_array_add (to_free, serialized);
+                                                blob, slen, 1));
           g_variant_builder_close (&nested);
         }
       g_variant_builder_close (&nested);
@@ -907,24 +904,22 @@ fp_print_deserialize (const guchar *data,
 
       for (i = 0; i < g_variant_n_children (prints); i++)
         {
-          g_autoptr(GVariant) sigfm_data = NULL;
+          g_autoptr(GVariant) entry_data = NULL;
           GVariant *child;
           gsize slen;
-          const unsigned char *serialized;
-          SigfmImgInfo *sigfm_info;
+          const guchar *blob;
+          GBytes *entry;
 
-          sigfm_data = g_variant_get_child_value (prints, i);
+          entry_data = g_variant_get_child_value (prints, i);
 
-          child = g_variant_get_child_value (sigfm_data, 0);
-          serialized =
-            g_variant_get_fixed_array (child, &slen, sizeof (unsigned char));
+          child = g_variant_get_child_value (entry_data, 0);
+          blob =
+            g_variant_get_fixed_array (child, &slen, sizeof (guchar));
+
+          entry = g_bytes_new (blob, slen);
           g_variant_unref (child);
 
-          sigfm_info = sigfm_deserialize_binary (serialized, slen);
-          if (!sigfm_info)
-            goto invalid_format;
-
-          g_ptr_array_add (result->prints, g_steal_pointer (&sigfm_info));
+          g_ptr_array_add (result->prints, entry);
         }
     }
   else if (type == FPI_PRINT_RAW)

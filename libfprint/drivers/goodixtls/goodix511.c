@@ -18,6 +18,8 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
+#define FP_COMPONENT "goodixtls511"
+
 #include "drivers/goodixtls/goodix5xx.h"
 #include "fp-device.h"
 #include "fp-image-device.h"
@@ -25,12 +27,10 @@
 #include "fpi-image-device.h"
 #include "fpi-image.h"
 #include "fpi-ssm.h"
-#include <stdio.h>
-#include <stdlib.h>
-
-#define FP_COMPONENT "goodixtls511"
 
 #include <glib.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "drivers_api.h"
