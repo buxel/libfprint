@@ -66,7 +66,7 @@ data_to_str(guint8 *data, guint32 length)
   gchar *string = g_malloc((length * 2) + 1);
 
   for (guint32 i = 0; i < length; i++)
-    sprintf(string + i * 2, "%02x", data[i]);
+    g_snprintf(string + i * 2, 3, "%02x", data[i]);
 
   return string;
 }

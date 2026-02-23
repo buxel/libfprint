@@ -346,12 +346,17 @@ fpi_image_device_extract_complete (FpImageDevice *self,
 
       if (print)
         {
-          /* Ensure the enroll_print type is set on first successful stage. */
+          /* Ensure the enroll_print type is set on first successful stage.
+           * This is deferred (rather than forcing NBIS at start_capture) so
+           * that drivers with custom build_print can set SIGFM or another
+           * type from their first successful extraction. */
           FpiPrintType enroll_type;
-          FpiPrintType print_type;
+
           g_object_get (enroll_print, "fpi-type", &enroll_type, NULL);
           if (enroll_type == FPI_PRINT_UNDEFINED)
             {
+              FpiPrintType print_type;
+
               g_object_get (print, "fpi-type", &print_type, NULL);
               fpi_print_set_type (enroll_print, print_type);
             }
@@ -425,6 +430,9 @@ fpi_image_device_extract_complete (FpImageDevice *self,
     }
   else
     {
+      /* All valid actions are handled above.  The previous race condition
+       * (minutiae detection completing after action changed) is avoided by
+       * the minutiae_scan_active guard above. */
       g_assert_not_reached ();
     }
 }

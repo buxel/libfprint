@@ -67,9 +67,9 @@ struct _FpImage
   guint8    *data;
   guint8    *binarized;
 
-  GPtrArray    *minutiae;
+  GPtrArray *minutiae;
 
-  gboolean      detection_in_progress;
+  gboolean   detection_in_progress;
 };
 
 gint fpi_std_sq_dev (const guint8 *buf,

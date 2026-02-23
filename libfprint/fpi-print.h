@@ -47,17 +47,19 @@ gboolean fpi_print_add_from_image (FpPrint *print,
 
 FpiMatchResult fpi_print_bz3_match (FpPrint *temp,
                                     FpPrint *print,
-                                    gint     score_threshold,
+                                    gint     bz3_threshold,
                                     GError **error);
 
-FpiMatchResult fpi_print_sigfm_match (FpPrint * template, FpPrint * print,
-                                      gint score_threshold, GError * *error);
+FpiMatchResult fpi_print_sigfm_match (FpPrint *template,
+                                      FpPrint *print,
+                                      gint     score_threshold,
+                                      GError **error);
 
 void fpi_print_add_sigfm_data (FpPrint      *print,
                                SigfmImgInfo *info);
 
 /* Helpers to encode metadata into user ID strings. */
-gchar * fpi_print_generate_user_id (FpPrint * print);
+gchar *  fpi_print_generate_user_id (FpPrint *print);
 gboolean fpi_print_fill_from_user_id (FpPrint    *print,
                                       const char *user_id);
 

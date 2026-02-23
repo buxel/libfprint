@@ -681,8 +681,6 @@ fp_print_serialize (FpPrint *print,
   g_variant_builder_open (&builder, G_VARIANT_TYPE_VARDICT);
   g_variant_builder_close (&builder);
 
-  GPtrArray * to_free = NULL;
-
   /* Insert NBIS print data for type NBIS, otherwise the GVariant directly */
   if (print->type == FPI_PRINT_NBIS)
     {
@@ -719,17 +717,19 @@ fp_print_serialize (FpPrint *print,
     }
   else if (print->type == FPI_PRINT_SIGFM)
     {
-      to_free = g_ptr_array_new ();
-      g_ptr_array_set_free_func (to_free, free);
+      g_autoptr(GPtrArray) to_free = g_ptr_array_new_with_free_func (free);
       GVariantBuilder nested =
         G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE ("(a(ay))"));
+      guint i;
+
       g_variant_builder_open (&nested, G_VARIANT_TYPE ("a(ay)"));
-      for (int i = 0; i != print->prints->len; ++i)
+      for (i = 0; i < print->prints->len; i++)
         {
-          g_variant_builder_open (&nested, G_VARIANT_TYPE ("(ay)"));
-          SigfmImgInfo * info = g_ptr_array_index (print->prints, i);
+          SigfmImgInfo *info = g_ptr_array_index (print->prints, i);
           int slen;
-          unsigned char * serialized = sigfm_serialize_binary (info, &slen);
+          unsigned char *serialized = sigfm_serialize_binary (info, &slen);
+
+          g_variant_builder_open (&nested, G_VARIANT_TYPE ("(ay)"));
           g_variant_builder_add_value (
             &nested, g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
                                                 serialized, slen, 1));
@@ -766,8 +766,6 @@ fp_print_serialize (FpPrint *print,
 
   g_variant_get_data (result);
   g_variant_store (result, (*data) + 3);
-  if (to_free != NULL)
-    g_ptr_array_free (to_free, TRUE);
 
   return TRUE;
 }
@@ -910,16 +908,19 @@ fp_print_deserialize (const guchar *data,
       for (i = 0; i < g_variant_n_children (prints); i++)
         {
           g_autoptr(GVariant) sigfm_data = NULL;
+          GVariant *child;
+          gsize slen;
+          const unsigned char *serialized;
+          SigfmImgInfo *sigfm_info;
 
           sigfm_data = g_variant_get_child_value (prints, i);
 
-          GVariant * child = g_variant_get_child_value (sigfm_data, 0);
-          gsize slen;
-          const unsigned char * serialized =
+          child = g_variant_get_child_value (sigfm_data, 0);
+          serialized =
             g_variant_get_fixed_array (child, &slen, sizeof (unsigned char));
           g_variant_unref (child);
 
-          SigfmImgInfo * sigfm_info = sigfm_deserialize_binary (serialized, slen);
+          sigfm_info = sigfm_deserialize_binary (serialized, slen);
           if (!sigfm_info)
             goto invalid_format;
 
