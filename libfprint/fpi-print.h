@@ -3,6 +3,7 @@
 #include "fpi-enums.h"
 #include "fp-device.h"
 #include "fp-print.h"
+#include "sigfm/sigfm.h"
 
 G_BEGIN_DECLS
 
@@ -51,6 +52,9 @@ FpiMatchResult fpi_print_bz3_match (FpPrint *temp,
 
 FpiMatchResult fpi_print_sigfm_match (FpPrint * template, FpPrint * print,
                                       gint score_threshold, GError * *error);
+
+void fpi_print_add_sigfm_data (FpPrint      *print,
+                               SigfmImgInfo *info);
 
 /* Helpers to encode metadata into user ID strings. */
 gchar * fpi_print_generate_user_id (FpPrint * print);

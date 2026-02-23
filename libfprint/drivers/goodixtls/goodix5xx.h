@@ -252,3 +252,15 @@ goodixtls5xx_squash_frame_linear(GoodixTls5xxPix *frame, guint8 *squashed,
  */
 void
 goodixtls5xx_cleanup(FpiDeviceGoodixTls5xx *dev);
+
+/* SIGFM vfunc implementations for FpImageDeviceClass */
+void         goodix_sigfm_extract     (FpImageDevice  *self,
+                                       FpImage        *image);
+gboolean     goodix_sigfm_build_print (FpImageDevice  *self,
+                                       FpPrint        *print,
+                                       FpImage        *image,
+                                       GError        **error);
+FpiMatchResult goodix_sigfm_compare   (FpImageDevice  *self,
+                                       FpPrint        *enrolled,
+                                       FpPrint        *probe,
+                                       GError        **error);

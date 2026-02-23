@@ -156,7 +156,7 @@ minutiae_to_xyt (struct fp_minutiae *minutiae,
  * @error: Return location for error
  *
  * Extracts the minutiae from the given image and adds it to @print of
- * type #FPI_PRINT_NBIS or #FPI_PRINT_SIGFM.
+ * type #FPI_PRINT_NBIS.
  *
  * The @image will be kept so that API users can get retrieve it e.g.
  * for debugging purposes.
@@ -172,8 +172,7 @@ fpi_print_add_from_image (FpPrint *print,
   struct fp_minutiae _minutiae;
   struct xyt_struct *xyt;
 
-  if ((print->type != FPI_PRINT_NBIS && print->type != FPI_PRINT_SIGFM) ||
-      !image)
+  if (print->type != FPI_PRINT_NBIS || !image)
     {
       g_set_error (error,
                    G_IO_ERROR,
@@ -181,35 +180,46 @@ fpi_print_add_from_image (FpPrint *print,
                    "Cannot add print data from image!");
       return FALSE;
     }
-  if (print->type == FPI_PRINT_NBIS)
-    {
-      minutiae = fp_image_get_minutiae (image);
-      if (!minutiae || minutiae->len == 0)
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                       "No minutiae found in image or not yet detected!");
-          return FALSE;
-        }
 
-      _minutiae.num = minutiae->len;
-      _minutiae.list = (struct fp_minutia **) minutiae->pdata;
-      _minutiae.alloc = minutiae->len;
-
-      xyt = g_new0 (struct xyt_struct, 1);
-      minutiae_to_xyt (&_minutiae, image->width, image->height, xyt);
-      g_ptr_array_add (print->prints, xyt);
-    }
-  else if (print->type == FPI_PRINT_SIGFM)
+  minutiae = fp_image_get_minutiae (image);
+  if (!minutiae || minutiae->len == 0)
     {
-      SigfmImgInfo *info = fp_image_get_sigfm_info (image);
-      g_ptr_array_add (print->prints, (void *) sigfm_copy_info (info));
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "No minutiae found in image or not yet detected!");
+      return FALSE;
     }
+
+  _minutiae.num = minutiae->len;
+  _minutiae.list = (struct fp_minutia **) minutiae->pdata;
+  _minutiae.alloc = minutiae->len;
+
+  xyt = g_new0 (struct xyt_struct, 1);
+  minutiae_to_xyt (&_minutiae, image->width, image->height, xyt);
+  g_ptr_array_add (print->prints, xyt);
 
   g_clear_object (&print->image);
   print->image = g_object_ref (image);
   g_object_notify (G_OBJECT (print), "image");
 
   return TRUE;
+}
+
+/**
+ * fpi_print_add_sigfm_data:
+ * @print: A #FpPrint of type #FPI_PRINT_SIGFM
+ * @info: (transfer none): The SIGFM image info to add (will be copied)
+ *
+ * Adds a copy of @info to @print. The print must already have its type
+ * set to #FPI_PRINT_SIGFM.
+ */
+void
+fpi_print_add_sigfm_data (FpPrint      *print,
+                          SigfmImgInfo *info)
+{
+  g_return_if_fail (print->type == FPI_PRINT_SIGFM);
+  g_return_if_fail (info != NULL);
+
+  g_ptr_array_add (print->prints, (void *) sigfm_copy_info (info));
 }
 
 /**

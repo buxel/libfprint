@@ -71,14 +71,9 @@ typedef enum {
   FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF,
 } FpiImageDeviceState;
 
-typedef enum {
-  FPI_DEVICE_ALGO_NBIS = FPI_PRINT_NBIS,
-  FPI_DEVICE_ALGO_SIGFM = FPI_PRINT_SIGFM,
-} FpiImageDeviceAlgorithm;
-
 /**
  * FpImageDeviceClass:
- * @score_threshold: Threshold to consider bozorth3 score a match, default: 40
+ * @bz3_threshold: Threshold to consider bozorth3 score a match, default: 40
  * @img_width: Width of the image, only provide if constant
  * @img_height: Height of the image, only provide if constant
  * @img_open: Open the device and do basic initialization
@@ -110,10 +105,9 @@ struct _FpImageDeviceClass
 {
   FpDeviceClass           parent_class;
 
-  gint                    score_threshold;
+  gint                    bz3_threshold;
   gint                    img_width;
   gint                    img_height;
-  FpiImageDeviceAlgorithm algorithm;
 
   void                    (*img_open)     (FpImageDevice *dev);
   void                    (*img_close)    (FpImageDevice *dev);
@@ -121,10 +115,28 @@ struct _FpImageDeviceClass
   void                    (*change_state) (FpImageDevice      *dev,
                                            FpiImageDeviceState state);
   void                    (*deactivate)   (FpImageDevice *dev);
+
+  /* Optional vfuncs for custom feature extraction and matching.
+   * If extract is set, the driver is responsible for calling
+   * fpi_image_device_extract_complete() when feature extraction finishes.
+   * If build_print is set, the driver creates the FpPrint from extracted
+   * features rather than using the default NBIS minutiae path.
+   * If compare is set, the driver performs matching rather than bz3_match.
+   */
+  void                    (*extract)      (FpImageDevice  *dev,
+                                           FpImage        *image);
+  gboolean                (*build_print)  (FpImageDevice  *dev,
+                                           FpPrint        *print,
+                                           FpImage        *image,
+                                           GError        **error);
+  FpiMatchResult          (*compare)      (FpImageDevice  *dev,
+                                           FpPrint        *enrolled,
+                                           FpPrint        *probe,
+                                           GError        **error);
 };
 
-void fpi_image_device_set_score_threshold (FpImageDevice *self,
-                                           gint           score_threshold);
+void fpi_image_device_set_bz3_threshold (FpImageDevice *self,
+                                         gint           bz3_threshold);
 
 void fpi_image_device_session_error (FpImageDevice *self,
                                      GError        *error);
@@ -142,5 +154,8 @@ void fpi_image_device_report_finger_status (FpImageDevice *self,
                                             gboolean       present);
 void fpi_image_device_image_captured (FpImageDevice *self,
                                       FpImage       *image);
+void fpi_image_device_extract_complete (FpImageDevice *self,
+                                        FpImage       *image,
+                                        GError        *error);
 void fpi_image_device_retry_scan (FpImageDevice *self,
                                   FpDeviceRetry  retry);

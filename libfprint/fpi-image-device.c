@@ -234,20 +234,57 @@ fp_image_device_maybe_complete_action (FpImageDevice *self, GError *error)
 }
 
 static void
-fpi_image_device_sigfm_extracted (GObject *source_object, GAsyncResult *res, gpointer user_data)
+fpi_image_device_default_extracted (GObject *source_object, GAsyncResult *res, gpointer user_data)
 {
   g_autoptr (FpImage) image = FP_IMAGE (source_object);
-  g_autoptr (FpPrint) print = NULL;
   GError *error = NULL;
   FpImageDevice *self = FP_IMAGE_DEVICE (user_data);
+
+  if (!fp_image_detect_minutiae_finish (image, res, &error))
+    {
+      /* Cancellation is handled inside extract_complete. */
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          g_warning ("Failed to detect minutiae: %s", error->message);
+          g_clear_pointer (&error, g_error_free);
+          error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
+                                            "Minutiae detection failed, please retry");
+        }
+    }
+
+  fpi_image_device_extract_complete (self, g_steal_pointer (&image), g_steal_pointer (&error));
+}
+
+/**
+ * fpi_image_device_extract_complete:
+ * @self: a #FpImageDevice imaging fingerprint device
+ * @image: (transfer full) (nullable): The #FpImage after feature extraction
+ * @error: (transfer full) (nullable): Error from extraction, or %NULL
+ *
+ * Report that feature extraction is complete. This is the unified
+ * post-extraction handler for both the default NBIS minutiae pipeline
+ * and custom driver pipelines (via the extract vfunc).
+ *
+ * Drivers that implement the extract vfunc must call this when their
+ * async extraction finishes.
+ */
+void
+fpi_image_device_extract_complete (FpImageDevice *self,
+                                   FpImage       *image,
+                                   GError        *error)
+{
+  g_autoptr (FpImage) _image = image;
+  g_autoptr (FpPrint) print = NULL;
   FpDevice *device = FP_DEVICE (self);
   FpImageDevicePrivate *priv;
+  FpImageDeviceClass *cls;
   FpiDeviceAction action;
 
-  priv = fp_image_device_get_instance_private (FP_IMAGE_DEVICE (device));
+  priv = fp_image_device_get_instance_private (self);
+  cls = FP_IMAGE_DEVICE_GET_CLASS (self);
   priv->minutiae_scan_active = FALSE;
 
-  if (!fp_image_extract_sigfm_info_finish (image, res, &error))
+  if (error)
     {
       if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
         {
@@ -256,33 +293,48 @@ fpi_image_device_sigfm_extracted (GObject *source_object, GAsyncResult *res, gpo
           return;
         }
 
-      g_warning ("Failed to extract SIGFM info: %s", error->message);
-      g_clear_pointer (&error, g_error_free);
-      error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "SIGFM extraction failed, please retry");
+      /* Non-cancellation errors flow through to action handling below. */
     }
 
   action = fpi_device_get_current_action (device);
 
   if (action == FPI_DEVICE_ACTION_CAPTURE)
     {
-      priv->capture_image = g_steal_pointer (&image);
+      priv->capture_image = g_steal_pointer (&_image);
       fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
       return;
     }
 
-  if (!error)
+  if (!error && _image)
     {
       print = fp_print_new (device);
-      fpi_print_set_type (print, priv->algorithm);
-      if (!fpi_print_add_from_image (print, image, &error))
-        {
-          g_clear_object (&print);
 
-          if (error->domain != FP_DEVICE_RETRY)
+      if (cls->build_print)
+        {
+          if (!cls->build_print (self, print, _image, &error))
             {
-              fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-              fpi_image_device_deactivate (self, TRUE);
-              return;
+              g_clear_object (&print);
+              if (error && error->domain != FP_DEVICE_RETRY)
+                {
+                  fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
+                  fpi_image_device_deactivate (self, TRUE);
+                  return;
+                }
+            }
+        }
+      else
+        {
+          /* Default NBIS path */
+          fpi_print_set_type (print, FPI_PRINT_NBIS);
+          if (!fpi_print_add_from_image (print, _image, &error))
+            {
+              g_clear_object (&print);
+              if (error && error->domain != FP_DEVICE_RETRY)
+                {
+                  fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
+                  fpi_image_device_deactivate (self, TRUE);
+                  return;
+                }
             }
         }
     }
@@ -294,6 +346,16 @@ fpi_image_device_sigfm_extracted (GObject *source_object, GAsyncResult *res, gpo
 
       if (print)
         {
+          /* Ensure the enroll_print type is set on first successful stage. */
+          FpiPrintType enroll_type;
+          FpiPrintType print_type;
+          g_object_get (enroll_print, "fpi-type", &enroll_type, NULL);
+          if (enroll_type == FPI_PRINT_UNDEFINED)
+            {
+              g_object_get (print, "fpi-type", &print_type, NULL);
+              fpi_print_set_type (enroll_print, print_type);
+            }
+
           fpi_print_add_print (enroll_print, print);
           priv->enroll_stage += 1;
         }
@@ -308,19 +370,22 @@ fpi_image_device_sigfm_extracted (GObject *source_object, GAsyncResult *res, gpo
         }
       else
         {
-          fp_image_device_enroll_maybe_await_finger_on (FP_IMAGE_DEVICE (device));
+          fp_image_device_enroll_maybe_await_finger_on (self);
         }
     }
   else if (action == FPI_DEVICE_ACTION_VERIFY)
     {
       FpPrint *template;
-      FpiMatchResult result;
+      FpiMatchResult result = FPI_MATCH_ERROR;
 
       fpi_device_get_verify_data (device, &template);
       if (print)
-        result = fpi_print_sigfm_match (template, print, priv->score_threshold, &error);
-      else
-        result = FPI_MATCH_ERROR;
+        {
+          if (cls->compare)
+            result = cls->compare (self, template, print, &error);
+          else
+            result = fpi_print_bz3_match (template, print, priv->bz3_threshold, &error);
+        }
 
       if (!error || error->domain == FP_DEVICE_RETRY)
         fpi_device_verify_report (device, result, g_steal_pointer (&print),
@@ -338,9 +403,14 @@ fpi_image_device_sigfm_extracted (GObject *source_object, GAsyncResult *res, gpo
       for (i = 0; !error && i < templates->len; i++)
         {
           FpPrint *template = g_ptr_array_index (templates, i);
+          FpiMatchResult match_result;
 
-          if (fpi_print_sigfm_match (template, print, priv->score_threshold, &error) ==
-              FPI_MATCH_SUCCESS)
+          if (cls->compare)
+            match_result = cls->compare (self, template, print, &error);
+          else
+            match_result = fpi_print_bz3_match (template, print, priv->bz3_threshold, &error);
+
+          if (match_result == FPI_MATCH_SUCCESS)
             {
               result = template;
               break;
@@ -359,165 +429,13 @@ fpi_image_device_sigfm_extracted (GObject *source_object, GAsyncResult *res, gpo
     }
 }
 
-static void
-fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, gpointer user_data)
-{
-  g_autoptr(FpImage) image = FP_IMAGE (source_object);
-  g_autoptr(FpPrint) print = NULL;
-  GError *error = NULL;
-  FpImageDevice *self = FP_IMAGE_DEVICE (user_data);
-  FpDevice *device = FP_DEVICE (self);
-  FpImageDevicePrivate *priv;
-  FpiDeviceAction action;
-
-  /* Note: We rely on the device to not disappear during an operation. */
-  priv = fp_image_device_get_instance_private (FP_IMAGE_DEVICE (device));
-  priv->minutiae_scan_active = FALSE;
-
-  if (!fp_image_detect_minutiae_finish (image, res, &error))
-    {
-      /* Cancel operation . */
-      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-          fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-          fpi_image_device_deactivate (self, TRUE);
-          return;
-        }
-
-      /* Replace error with a retry condition. */
-      g_warning ("Failed to detect minutiae: %s", error->message);
-      g_clear_pointer (&error, g_error_free);
-
-      error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "Minutiae detection failed, please retry");
-    }
-
-  action = fpi_device_get_current_action (device);
-
-  if (action == FPI_DEVICE_ACTION_CAPTURE)
-    {
-      priv->capture_image = g_steal_pointer (&image);
-      fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-      return;
-    }
-
-  if (!error)
-    {
-      print = fp_print_new (device);
-      fpi_print_set_type (print, priv->algorithm);
-      if (!fpi_print_add_from_image (print, image, &error))
-        {
-          g_clear_object (&print);
-
-          if (error->domain != FP_DEVICE_RETRY)
-            {
-              fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-              /* We might not yet be deactivating, if we are enrolling. */
-              fpi_image_device_deactivate (self, TRUE);
-              return;
-            }
-        }
-    }
-
-  if (action == FPI_DEVICE_ACTION_ENROLL)
-    {
-      FpPrint *enroll_print;
-      fpi_device_get_enroll_data (device, &enroll_print);
-
-      if (print)
-        {
-          fpi_print_add_print (enroll_print, print);
-          priv->enroll_stage += 1;
-        }
-
-      fpi_device_enroll_progress (device, priv->enroll_stage,
-                                  g_steal_pointer (&print), error);
-
-      /* Start another scan or deactivate. */
-      if (priv->enroll_stage == fp_device_get_nr_enroll_stages (device))
-        {
-          fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-          fpi_image_device_deactivate (self, FALSE);
-        }
-      else
-        {
-          fp_image_device_enroll_maybe_await_finger_on (FP_IMAGE_DEVICE (device));
-        }
-    }
-  else if (action == FPI_DEVICE_ACTION_VERIFY)
-    {
-      FpPrint *template;
-      FpiMatchResult result = FPI_MATCH_ERROR;
-
-      fpi_device_get_verify_data (device, &template);
-      if (print)
-        {
-          if (priv->algorithm == FPI_PRINT_NBIS)
-            result = fpi_print_bz3_match (template, print, priv->score_threshold,
-                                          &error);
-          else if (priv->algorithm == FPI_PRINT_SIGFM)
-            result = fpi_print_sigfm_match (template, print, priv->score_threshold,
-                                            &error);
-        }
-      else
-        {
-          result = FPI_MATCH_ERROR;
-        }
-
-      if (!error || error->domain == FP_DEVICE_RETRY)
-        fpi_device_verify_report (device, result, g_steal_pointer (&print), g_steal_pointer (&error));
-
-      fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-    }
-  else if (action == FPI_DEVICE_ACTION_IDENTIFY)
-    {
-      gint i;
-      GPtrArray *templates;
-      FpPrint *result = NULL;
-
-      fpi_device_get_identify_data (device, &templates);
-      for (i = 0; !error && i < templates->len; i++)
-        {
-          FpPrint *template = g_ptr_array_index (templates, i);
-
-          int match_result = FPI_MATCH_ERROR;
-          if (priv->algorithm == FPI_PRINT_NBIS)
-            match_result = fpi_print_bz3_match (template, print,
-                                                priv->score_threshold, &error);
-          else if (priv->algorithm == FPI_PRINT_SIGFM)
-            match_result = fpi_print_sigfm_match (template, print,
-                                                  priv->score_threshold, &error);
-
-          if (match_result == FPI_MATCH_SUCCESS)
-            {
-              result = template;
-              break;
-            }
-        }
-
-      if (!error || error->domain == FP_DEVICE_RETRY)
-        fpi_device_identify_report (device, result, g_steal_pointer (&print), g_steal_pointer (&error));
-
-      fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-    }
-  else
-    {
-      /* XXX: This can be hit currently due to a race condition in the enroll code!
-       *      In that case we scan a further image even though the minutiae for the previous
-       *      one have not yet been detected.
-       *      We need to keep track on the pending minutiae detection and the fact that
-       *      it will finish eventually (or we may need to retry on error and activate the
-       *      device again). */
-      g_assert_not_reached ();
-    }
-}
-
 /*********************************************************/
 /* Private API */
 
 /**
- * fpi_image_device_set_score_threshold:
+ * fpi_image_device_set_bz3_threshold:
  * @self: a #FpImageDevice imaging fingerprint device
- * @score_threshold: BZ3 threshold to use
+ * @bz3_threshold: BZ3 threshold to use
  *
  * Dynamically adjust the bz3 threshold. This is only needed for drivers
  * that support devices with different properties. It should generally be
@@ -525,15 +443,15 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
  * callback.
  */
 void
-fpi_image_device_set_score_threshold (FpImageDevice *self,
-                                      gint           score_threshold)
+fpi_image_device_set_bz3_threshold (FpImageDevice *self,
+                                    gint           bz3_threshold)
 {
   FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
 
   g_return_if_fail (FP_IS_IMAGE_DEVICE (self));
-  g_return_if_fail (score_threshold > 0);
+  g_return_if_fail (bz3_threshold > 0);
 
-  priv->score_threshold = score_threshold;
+  priv->bz3_threshold = bz3_threshold;
 }
 
 /**
@@ -623,6 +541,7 @@ void
 fpi_image_device_image_captured (FpImageDevice *self, FpImage *image)
 {
   FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
+  FpImageDeviceClass *cls = FP_IMAGE_DEVICE_GET_CLASS (self);
   FpiDeviceAction action;
 
   action = fpi_device_get_current_action (FP_DEVICE (self));
@@ -638,19 +557,17 @@ fpi_image_device_image_captured (FpImageDevice *self, FpImage *image)
 
   priv->minutiae_scan_active = TRUE;
 
-  if (priv->algorithm != FPI_PRINT_SIGFM)
+  if (cls->extract)
+    {
+      cls->extract (self, image);
+    }
+  else
     {
       /* XXX: We also detect minutiae in capture mode, we solely do this
        *      to normalize the image which will happen as a by-product. */
       fp_image_detect_minutiae (image,
                                 fpi_device_get_cancellable (FP_DEVICE (self)),
-                                fpi_image_device_minutiae_detected, self);
-    }
-  else
-    {
-      fp_image_extract_sigfm_info (image,
-                                   fpi_device_get_cancellable (FP_DEVICE (self)),
-                                   fpi_image_device_sigfm_extracted, self);
+                                fpi_image_device_default_extracted, self);
     }
 
   /* XXX: This is wrong if we add support for raw capture mode. */

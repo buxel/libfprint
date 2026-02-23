@@ -20,7 +20,9 @@
 //
 #include "fp-image-device.h"
 #include "fpi-image-device.h"
+#include "fpi-print.h"
 #include "fpi-ssm.h"
+#include "sigfm/sigfm.h"
 #define FP_COMPONENT "goodixtls5xx"
 
 #include "drivers/goodixtls/goodix5xx.h"
@@ -33,6 +35,7 @@ typedef struct
 {
   guint8 *otp; // TODO: Remove
   GoodixTls5xxPix *calibration_img;
+  SigfmImgInfo    *last_sigfm_info;
 } FpiDeviceGoodixTls5xxPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(FpiDeviceGoodixTls5xx, fpi_device_goodixtls5xx,
@@ -764,6 +767,148 @@ goodixtls5xx_init_tls(FpDevice *dev)
   goodix_tls_init(dev, tls_activation_complete, NULL);
 }
 
+/* ---- SIGFM vfunc implementations ---- */
+
+#define GOODIX_SIGFM_THRESHOLD    7
+#define GOODIX_SIGFM_MIN_KEYPOINTS 25
+
+typedef struct
+{
+  SigfmImgInfo *sigfm_info;
+  guchar       *image_data;
+  gint          width;
+  gint          height;
+} GoodixSigfmExtractData;
+
+static void
+goodix_sigfm_extract_data_free (GoodixSigfmExtractData *data)
+{
+  g_clear_pointer (&data->image_data, g_free);
+  g_clear_pointer (&data->sigfm_info, sigfm_free_info);
+  g_free (data);
+}
+
+static void
+goodix_sigfm_extract_thread (GTask        *task,
+                             gpointer      source_object,
+                             gpointer      task_data,
+                             GCancellable *cancellable)
+{
+  GoodixSigfmExtractData *data = task_data;
+  GTimer *timer = g_timer_new ();
+
+  data->sigfm_info = sigfm_extract (data->image_data, data->width, data->height);
+  g_timer_stop (timer);
+  fp_dbg ("sigfm extract completed in %f secs", g_timer_elapsed (timer, NULL));
+  g_timer_destroy (timer);
+
+  if (!data->sigfm_info)
+    {
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "SIGFM extraction failed");
+      return;
+    }
+
+  fp_dbg ("sigfm keypoints: %d", sigfm_keypoints_count (data->sigfm_info));
+
+  if (sigfm_keypoints_count (data->sigfm_info) < GOODIX_SIGFM_MIN_KEYPOINTS)
+    {
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "Not enough keypoints (%d < %d)",
+                               sigfm_keypoints_count (data->sigfm_info),
+                               GOODIX_SIGFM_MIN_KEYPOINTS);
+      return;
+    }
+
+  g_task_return_boolean (task, TRUE);
+}
+
+static void
+goodix_sigfm_extract_done (GObject      *source_object,
+                           GAsyncResult *res,
+                           gpointer      user_data)
+{
+  GTask *task = G_TASK (res);
+  FpImageDevice *self = FP_IMAGE_DEVICE (user_data);
+  FpImage *image = FP_IMAGE (source_object);
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (self));
+  GoodixSigfmExtractData *data = g_task_get_task_data (task);
+  GError *error = NULL;
+
+  if (!g_task_propagate_boolean (task, &error))
+    {
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          g_warning ("SIGFM extraction failed: %s", error->message);
+          g_clear_pointer (&error, g_error_free);
+          error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
+                                            "SIGFM extraction failed, please retry");
+        }
+    }
+  else
+    {
+      g_clear_pointer (&priv->last_sigfm_info, sigfm_free_info);
+      priv->last_sigfm_info = g_steal_pointer (&data->sigfm_info);
+    }
+
+  fpi_image_device_extract_complete (self, g_object_ref (image), error);
+}
+
+void
+goodix_sigfm_extract (FpImageDevice *self, FpImage *image)
+{
+  GTask *task;
+  GoodixSigfmExtractData *data;
+
+  data = g_new0 (GoodixSigfmExtractData, 1);
+  data->width = image->width;
+  data->height = image->height;
+  data->image_data = g_memdup2 (image->data, image->width * image->height);
+
+  task = g_task_new (image,
+                     fpi_device_get_cancellable (FP_DEVICE (self)),
+                     goodix_sigfm_extract_done,
+                     self);
+  g_task_set_task_data (task, data,
+                        (GDestroyNotify) goodix_sigfm_extract_data_free);
+  g_task_run_in_thread (task, goodix_sigfm_extract_thread);
+  g_object_unref (task);
+}
+
+gboolean
+goodix_sigfm_build_print (FpImageDevice  *self,
+                          FpPrint        *print,
+                          FpImage        *image,
+                          GError        **error)
+{
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (self));
+
+  if (!priv->last_sigfm_info)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                   "No SIGFM data available");
+      return FALSE;
+    }
+
+  fpi_print_set_type (print, FPI_PRINT_SIGFM);
+  fpi_print_add_sigfm_data (print, priv->last_sigfm_info);
+
+  return TRUE;
+}
+
+FpiMatchResult
+goodix_sigfm_compare (FpImageDevice *self,
+                      FpPrint       *enrolled,
+                      FpPrint       *probe,
+                      GError       **error)
+{
+  return fpi_print_sigfm_match (enrolled, probe, GOODIX_SIGFM_THRESHOLD, error);
+}
+
+/* ---- End SIGFM vfunc implementations ---- */
+
 void
 fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
 {
@@ -787,6 +932,7 @@ fpi_device_goodixtls5xx_init(FpiDeviceGoodixTls5xx *self)
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(self);
   priv->calibration_img = NULL;
   priv->otp = NULL;
+  priv->last_sigfm_info = NULL;
 }
 
 void
@@ -795,4 +941,5 @@ goodixtls5xx_cleanup(FpiDeviceGoodixTls5xx *dev)
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(dev);
   g_free(priv->calibration_img);
   priv->calibration_img = NULL;
+  g_clear_pointer(&priv->last_sigfm_info, sigfm_free_info);
 }
