@@ -22,13 +22,9 @@
 #include "fp-device.h"
 #include "fp-image-device.h"
 #include "fp-image.h"
-#include "fpi-assembling.h"
-#include "fpi-context.h"
 #include "fpi-image-device.h"
 #include "fpi-image.h"
 #include "fpi-ssm.h"
-#include "glibconfig.h"
-#include "gusb/gusb-device.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -67,8 +63,6 @@ G_DECLARE_FINAL_TYPE(FpiDeviceGoodixTls511, fpi_device_goodixtls511, FPI,
 
 G_DEFINE_TYPE(FpiDeviceGoodixTls511, fpi_device_goodixtls511,
               FPI_TYPE_DEVICE_GOODIXTLS5XX);
-
-// ---- ACTIVE SECTION START ----
 
 enum activate_states
 {
@@ -222,19 +216,9 @@ activate_complete(FpiSsm *ssm, FpDevice *dev, GError *error)
     }
 }
 
-// ---- ACTIVE SECTION END ----
-
-// -----------------------------------------------------------------------------
-
-// ---- SCAN SECTION START ----
-
 const guint8 fdt_switch_state_mode[] = {
   0x01, 0x80, 0xaf, 0x80, 0xbf, 0x80, 0xa4, 0x80, 0xb8, 0x80, 0xa8, 0x80, 0xb7,
 };
-
-// ---- SCAN SECTION END ----
-
-// ---- DEV SECTION START ----
 
 static void
 dev_activate(FpImageDevice *img_dev)
@@ -244,8 +228,6 @@ dev_activate(FpImageDevice *img_dev)
   fpi_ssm_start(fpi_ssm_new(dev, activate_run_state, ACTIVATE_NUM_STATES),
                 activate_complete);
 }
-
-// ---- DEV SECTION END ----
 
 static void
 fpi_device_goodixtls511_init(FpiDeviceGoodixTls511 *self)

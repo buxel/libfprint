@@ -20,7 +20,6 @@
 
 #include <gio/gio.h>
 #include <glib.h>
-#include <stdio.h>
 
 #include "goodix_proto.h"
 

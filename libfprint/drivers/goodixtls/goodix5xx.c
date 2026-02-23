@@ -87,7 +87,7 @@ on_calibrate_scan(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
   if (!priv->calibration_img)
     {
       priv->calibration_img
-          = calloc(cls->scan_height * cls->scan_width, sizeof(GoodixTls5xxPix));
+          = g_malloc0(cls->scan_height * cls->scan_width * sizeof(GoodixTls5xxPix));
     }
   goodixtls5xx_decode_frame(priv->calibration_img, len, data);
 
@@ -462,7 +462,7 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
   FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS(dev);
 
   GoodixTls5xxPix *raw_frame
-      = calloc(cls->scan_width * cls->scan_height, sizeof(GoodixTls5xxPix));
+      = g_malloc0(cls->scan_width * cls->scan_height * sizeof(GoodixTls5xxPix));
   goodixtls5xx_decode_frame(raw_frame, len, data);
   linear_subtract_inplace(raw_frame, priv->calibration_img,
                           cls->scan_width * cls->scan_height);
@@ -514,13 +514,13 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
         }
     }
 
-  guint8 *squashed = calloc(cls->scan_height * cls->scan_width, 1);
+  guint8 *squashed = g_malloc0(cls->scan_height * cls->scan_width);
   goodixtls5xx_squash_frame_percentile(raw_frame, squashed,
                                        cls->scan_height * cls->scan_width);
-  free(raw_frame);
+  g_free(raw_frame);
   goodixtls5xx_unsharp_mask_inplace(squashed, cls->scan_width, cls->scan_height);
   FpImage *img = cls->process_frame(squashed);
-  free(squashed);
+  g_free(squashed);
 
   /* Quality gate: reject frames with insufficient contrast (no finger,
    * partial touch, or wet/smeared contact).  Compute the standard

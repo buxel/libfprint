@@ -22,7 +22,7 @@
 
 #include "drivers_api.h"
 
-// 1 seconds USB timeout
+// 1 second USB timeout
 #define GOODIX_TIMEOUT (1000)
 
 G_DECLARE_DERIVABLE_TYPE(FpiDeviceGoodixTls, fpi_device_goodixtls, FPI, DEVICE_GOODIXTLS,
