@@ -100,7 +100,7 @@ static guint16 otp_write_addrs[] = { 0x0220, 0x0236, 0x0238, 0x023a };
 static void
 otp_write_run(FpiSsm *ssm, FpDevice *dev)
 {
-  guint16 data;
+  guint16 data = 0;
   FpiDeviceGoodixTls511 *self = FPI_DEVICE_GOODIXTLS511(dev);
   guint8 *otp = self->otp;
 
@@ -126,7 +126,7 @@ otp_write_run(FpiSsm *ssm, FpDevice *dev)
   goodix_send_write_sensor_register(dev, otp_write_addrs[fpi_ssm_get_cur_state(ssm)],
                                     data, goodixtls5xx_check_none, ssm);
   if (fpi_ssm_get_cur_state(ssm) == OTP_WRITE_NUM - 1)
-    free(self->otp);
+    g_free(self->otp);
 }
 
 static void
@@ -144,7 +144,7 @@ read_otp_callback(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
       return;
     }
   FpiDeviceGoodixTls511 *self = FPI_DEVICE_GOODIXTLS511(dev);
-  self->otp = malloc(len);
+  self->otp = g_malloc(len);
   memcpy(self->otp, data, len);
   FpiSsm *otp_ssm = fpi_ssm_new(dev, otp_write_run, OTP_WRITE_NUM);
   fpi_ssm_start_subsm(ssm, otp_ssm);
@@ -248,7 +248,7 @@ fpi_device_goodixtls511_init(FpiDeviceGoodixTls511 *self)
 {
 }
 static GoodixTls5xxMcuConfig
-get_mcu_config()
+get_mcu_config(void)
 {
   GoodixTls5xxMcuConfig cfg;
 
@@ -306,7 +306,7 @@ fpi_device_goodixtls511_class_init(FpiDeviceGoodixTls511Class *class)
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->temp_hot_seconds = -1; /* sensor has no overcurrent risk */
 
-  img_dev_class->score_threshold = 6;
+  img_dev_class->score_threshold = 7;
   img_dev_class->img_width = GOODIX511_WIDTH;
   img_dev_class->img_height = GOODIX511_HEIGHT;
   img_dev_class->algorithm = FPI_DEVICE_ALGO_SIGFM;

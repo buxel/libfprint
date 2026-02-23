@@ -26,6 +26,7 @@
 #include "drivers/goodixtls/goodix5xx.h"
 #include "drivers_api.h"
 #include "goodix.h"
+#include <math.h>
 #include <stdio.h>
 
 typedef struct
@@ -395,8 +396,10 @@ goodixtls5xx_squash_frame_percentile(GoodixTls5xxPix *frame, guint8 *squashed,
  * Unsharp mask: out = clip(boost × in − (boost−1) × blur(in)) using a
  * 3×3 Gaussian kernel [1,2,1 / 2,4,2 / 1,2,1] / 16.  Sharpens ridge
  * detail after the histogram stretch, increasing BRIEF descriptor
- * discriminability.  Windows driver uses boost ≈ 10; we use 4 as a
- * balance between ridge contrast and noise amplification.
+ * discriminability.  Windows driver uses boost ≈ 10 with per-pixel factory
+ * calibration; without calibration, boost > 4 amplifies fixed-pattern sensor
+ * noise and destroys impostor rejection (tested: boost=6 → impostor max 23,
+ * boost=8 → impostor max 33, vs boost=4 → impostor max 5).
  * ---------------------------------------------------------------------- */
 #define UNSHARP_BOOST 4
 
@@ -473,22 +476,22 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
    * Usage: FP_SAVE_RAW=/path/to/dir ./img-capture finger.pgm
    * Produces: calibration.bin (once) + raw_NNNN.bin per capture.
    * Each file is scan_width × scan_height × sizeof(uint16) bytes. */
-  const char *save_dir = g_getenv ("FP_SAVE_RAW");
+  const char *save_dir = g_getenv("FP_SAVE_RAW");
   if (save_dir)
     {
       int npix = cls->scan_width * cls->scan_height;
       char path[256];
 
       /* Save calibration frame once */
-      g_snprintf (path, sizeof (path), "%s/calibration.bin", save_dir);
-      if (!g_file_test (path, G_FILE_TEST_EXISTS))
+      g_snprintf(path, sizeof(path), "%s/calibration.bin", save_dir);
+      if (!g_file_test(path, G_FILE_TEST_EXISTS))
         {
-          FILE *cf = fopen (path, "wb");
+          FILE *cf = fopen(path, "wb");
           if (cf)
             {
-              fwrite (priv->calibration_img, sizeof (GoodixTls5xxPix), npix, cf);
-              fclose (cf);
-              fp_dbg ("saved calibration frame to %s (%d pixels)", path, npix);
+              fwrite(priv->calibration_img, sizeof(GoodixTls5xxPix), npix, cf);
+              fclose(cf);
+              fp_dbg("saved calibration frame to %s (%d pixels)", path, npix);
             }
         }
 
@@ -499,20 +502,20 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
       int seq = seq_hwm;
       for (;;)
         {
-          g_snprintf (path, sizeof (path), "%s/raw_%04d.bin", save_dir, seq);
-          if (!g_file_test (path, G_FILE_TEST_EXISTS))
+          g_snprintf(path, sizeof(path), "%s/raw_%04d.bin", save_dir, seq);
+          if (!g_file_test(path, G_FILE_TEST_EXISTS))
             break;
           seq++;
         }
       seq_hwm = seq + 1;
 
       /* Save raw frame (post-decode, post-cal-subtract, pre-stretch/unsharp) */
-      FILE *rf = fopen (path, "wb");
+      FILE *rf = fopen(path, "wb");
       if (rf)
         {
-          fwrite (raw_frame, sizeof (GoodixTls5xxPix), npix, rf);
-          fclose (rf);
-          fp_dbg ("saved raw frame to %s (%d pixels)", path, npix);
+          fwrite(raw_frame, sizeof(GoodixTls5xxPix), npix, rf);
+          fclose(rf);
+          fp_dbg("saved raw frame to %s (%d pixels)", path, npix);
         }
     }
 
@@ -523,6 +526,40 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
   goodixtls5xx_unsharp_mask_inplace(squashed, cls->scan_width, cls->scan_height);
   FpImage *img = cls->process_frame(squashed);
   free(squashed);
+
+  /* Quality gate: reject frames with insufficient contrast (no finger,
+   * partial touch, or wet/smeared contact).  Compute the standard
+   * deviation of pixel intensities in the image — a flat frame (all
+   * similar values) indicates no useful ridge detail.  This prevents
+   * garbage frames from consuming fprintd retry attempts.
+   *
+   * Threshold calibrated from the 5-finger corpus: genuine frames have
+   * stddev ≥ 40; background/air frames have stddev < 15. */
+#define QUALITY_STDDEV_MIN 25
+  {
+    int npx = img->width * img->height;
+    long sum = 0;
+    for (int i = 0; i < npx; i++)
+      sum += img->data[i];
+    int mean = (int)(sum / npx);
+    long var = 0;
+    for (int i = 0; i < npx; i++)
+      {
+        int d = (int)img->data[i] - mean;
+        var += d * d;
+      }
+    int stddev = (int)sqrt((double)var / npx);
+    fp_dbg("frame quality: stddev=%d (min=%d)", stddev, QUALITY_STDDEV_MIN);
+    if (stddev < QUALITY_STDDEV_MIN)
+      {
+        fp_dbg("rejecting low-quality frame (stddev %d < %d)", stddev,
+               QUALITY_STDDEV_MIN);
+        g_object_unref(img);
+        fpi_image_device_retry_scan(img_dev, FP_DEVICE_RETRY_CENTER_FINGER);
+        fpi_ssm_next_state(ssm);
+        return;
+      }
+  }
 
   fpi_image_device_image_captured(img_dev, img);
 

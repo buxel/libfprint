@@ -161,10 +161,14 @@ fast9_score(const uint8_t *img, int w, int x, int y, int threshold)
 
 #define FAST_THRESHOLD 10
 #define FAST_BORDER (3 + PATCH_HALF) /* avoid circle + patch OOB */
+#define FAST_BORDER_DETECT 4         /* FAST radius 3 + 1 for NMS only */
 #define MAX_KP 128
+#define MULTISCALE_DUP_DIST_SQ 16.0f /* 4px near-duplicate suppression */
+#define HESSIAN_DET_THRESH 0         /* B4: filter weak corners (0=disabled) */
 
 static int
-detect_keypoints(const uint8_t *img, int w, int h, OrbKeypoint *kp_out, int max_kp)
+detect_keypoints_ex(const uint8_t *img, int w, int h, OrbKeypoint *kp_out, int max_kp,
+                    int border)
 {
   /* Score map: 0 = not a corner */
   int *scores = calloc((size_t)(w * h), sizeof(int));
@@ -172,17 +176,17 @@ detect_keypoints(const uint8_t *img, int w, int h, OrbKeypoint *kp_out, int max_
     return 0;
 
   /* Pass 1: compute FAST scores */
-  for (int y = FAST_BORDER; y < h - FAST_BORDER; y++)
+  for (int y = border; y < h - border; y++)
     {
-      for (int x = FAST_BORDER; x < w - FAST_BORDER; x++)
+      for (int x = border; x < w - border; x++)
         scores[y * w + x] = fast9_score(img, w, x, y, FAST_THRESHOLD);
     }
 
   /* Pass 2: 3×3 NMS — keep only local maxima */
   int n = 0;
-  for (int y = FAST_BORDER; y < h - FAST_BORDER && n < max_kp; y++)
+  for (int y = border; y < h - border && n < max_kp; y++)
     {
-      for (int x = FAST_BORDER; x < w - FAST_BORDER && n < max_kp; x++)
+      for (int x = border; x < w - border && n < max_kp; x++)
         {
           int s = scores[y * w + x];
           if (s == 0)
@@ -204,6 +208,32 @@ detect_keypoints(const uint8_t *img, int w, int h, OrbKeypoint *kp_out, int max_
 
   free(scores);
   return n;
+}
+
+/* Full-resolution detection with BRIEF clearance */
+static int
+detect_keypoints(const uint8_t *img, int w, int h, OrbKeypoint *kp_out, int max_kp)
+{
+  return detect_keypoints_ex(img, w, h, kp_out, max_kp, FAST_BORDER);
+}
+
+/* -------------------------------------------------------------------------
+ * 2× downsample via 2×2 average pooling (for multi-scale pyramid)
+ * ---------------------------------------------------------------------- */
+
+static void
+downsample_2x(const uint8_t *src, int w, int h, uint8_t *dst)
+{
+  int hw = w / 2, hh = h / 2;
+  for (int y = 0; y < hh; y++)
+    for (int x = 0; x < hw; x++)
+      {
+        int sx = x * 2, sy = y * 2;
+        dst[y * hw + x]
+            = (uint8_t)((src[sy * w + sx] + src[sy * w + sx + 1] + src[(sy + 1) * w + sx]
+                         + src[(sy + 1) * w + sx + 1] + 2)
+                        / 4);
+      }
 }
 
 /* -------------------------------------------------------------------------
@@ -254,7 +284,7 @@ hamming_dist(const uint8_t *a, const uint8_t *b)
  * KNN matching (k=2) with Lowe ratio test
  * ---------------------------------------------------------------------- */
 
-#define RATIO_TEST 0.85f
+#define RATIO_TEST 0.80f
 #define MIN_MATCH 5
 
 typedef struct
@@ -288,8 +318,7 @@ knn_match(const SigfmImgInfo *query, const SigfmImgInfo *train, Match *matches_o
             }
         }
 
-      if (best1_idx >= 0 && best2 > 0 &&
-          (float)best1 < RATIO_TEST * (float)best2)
+      if (best1_idx >= 0 && best2 > 0 && (float)best1 < RATIO_TEST * (float)best2)
         {
           matches_out[n].qi = q;
           matches_out[n].ti = best1_idx;
@@ -305,8 +334,8 @@ knn_match(const SigfmImgInfo *query, const SigfmImgInfo *train, Match *matches_o
  * false descriptor matches and dramatically reduces impostor match
  * counts, improving RANSAC discriminability.  */
 static int
-cross_check_filter(const SigfmImgInfo *query, const SigfmImgInfo *train,
-                   Match *matches, int n_matches)
+cross_check_filter(const SigfmImgInfo *query, const SigfmImgInfo *train, Match *matches,
+                   int n_matches)
 {
   int out = 0;
   for (int i = 0; i < n_matches; i++)
@@ -331,15 +360,12 @@ cross_check_filter(const SigfmImgInfo *query, const SigfmImgInfo *train,
 }
 
 /* -------------------------------------------------------------------------
- * RANSAC rigid-transform geometric verification
+ * Geometric verification — RANSAC rigid-transform estimation
  *
- * Estimates a 2D rigid transform (rotation + translation) from randomly
- * sampled 2-point correspondences and counts inliers.  This cleanly
- * separates genuine matches (coherent spatial transform → many inliers)
- * from impostor matches (random scatter → 0-2 inliers).
- *
- * Replaces the previous pairwise angle-counting scorer which was O(n⁴)
- * and produced false agreements from random descriptor correlations.
+ * Random 2-point sampling estimates rotation + translation; inliers
+ * are counted under a pixel-distance threshold.  Least-squares
+ * refinement from all inliers of the best model further improves the
+ * transform before final scoring.
  * ---------------------------------------------------------------------- */
 
 #define RANSAC_ITERATIONS 200
@@ -358,6 +384,116 @@ xorshift32(uint32_t *state)
   return x;
 }
 
+/* Count inliers for a given rigid transform (cos,-sin,sin,cos,tx,ty). */
+static int
+count_inliers(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled,
+              const Match *matches, int n_matches, float a, float b, float c, float d,
+              float tx, float ty, float eps_sq)
+{
+  int inliers = 0;
+  for (int m = 0; m < n_matches; m++)
+    {
+      float px = frame->kp[matches[m].qi].x;
+      float py = frame->kp[matches[m].qi].y;
+      float qx = enrolled->kp[matches[m].ti].x;
+      float qy = enrolled->kp[matches[m].ti].y;
+
+      float pred_x = a * px + b * py + tx;
+      float pred_y = c * px + d * py + ty;
+
+      float ex = pred_x - qx;
+      float ey = pred_y - qy;
+
+      if (ex * ex + ey * ey < eps_sq)
+        inliers++;
+    }
+  return inliers;
+}
+
+/* Least-squares refinement: re-estimate transform from inliers, re-count.
+ * Uses rigid model (rotation + translation) for the refinement step to
+ * prevent overfitting the affine model to noise. */
+static int
+ls_refine(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled, const Match *matches,
+          int n_matches, float a, float b, float c, float d, float tx, float ty,
+          float eps_sq, float *out_a, float *out_b, float *out_c, float *out_d,
+          float *out_tx, float *out_ty)
+{
+  /* 1. Compute centroids of inlier correspondences */
+  float cx = 0, cy = 0, dx = 0, dy = 0;
+  int ni = 0;
+  for (int m = 0; m < n_matches; m++)
+    {
+      float px = frame->kp[matches[m].qi].x;
+      float py = frame->kp[matches[m].qi].y;
+      float qx = enrolled->kp[matches[m].ti].x;
+      float qy = enrolled->kp[matches[m].ti].y;
+
+      float pred_x = a * px + b * py + tx;
+      float pred_y = c * px + d * py + ty;
+      float ex = pred_x - qx;
+      float ey = pred_y - qy;
+
+      if (ex * ex + ey * ey < eps_sq)
+        {
+          cx += px;
+          cy += py;
+          dx += qx;
+          dy += qy;
+          ni++;
+        }
+    }
+  if (ni < 3)
+    return -1;
+
+  cx /= ni;
+  cy /= ni;
+  dx /= ni;
+  dy /= ni;
+
+  /* 2. Compute optimal rotation via cross-covariance */
+  float sum_cos = 0, sum_sin = 0;
+  for (int m = 0; m < n_matches; m++)
+    {
+      float px = frame->kp[matches[m].qi].x;
+      float py = frame->kp[matches[m].qi].y;
+      float qx = enrolled->kp[matches[m].ti].x;
+      float qy = enrolled->kp[matches[m].ti].y;
+
+      float pred_x = a * px + b * py + tx;
+      float pred_y = c * px + d * py + ty;
+      float ex = pred_x - qx;
+      float ey = pred_y - qy;
+
+      if (ex * ex + ey * ey < eps_sq)
+        {
+          float pcx = px - cx;
+          float pcy = py - cy;
+          float qcx = qx - dx;
+          float qcy = qy - dy;
+          sum_cos += pcx * qcx + pcy * qcy;
+          sum_sin += pcx * qcy - pcy * qcx;
+        }
+    }
+
+  float norm = sqrtf(sum_cos * sum_cos + sum_sin * sum_sin);
+  if (norm < 1e-6f)
+    return -1;
+
+  float ref_cos = sum_cos / norm;
+  float ref_sin = sum_sin / norm;
+  *out_a = ref_cos;
+  *out_b = -ref_sin;
+  *out_c = ref_sin;
+  *out_d = ref_cos;
+  *out_tx = dx - (ref_cos * cx - ref_sin * cy);
+  *out_ty = dy - (ref_sin * cx + ref_cos * cy);
+
+  /* 3. Re-count inliers with refined transform */
+  return count_inliers(frame, enrolled, matches, n_matches, *out_a, *out_b, *out_c,
+                       *out_d, *out_tx, *out_ty, eps_sq);
+}
+
 static int
 ransac_score(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled,
              const Match *matches, int n_matches)
@@ -367,9 +503,10 @@ ransac_score(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled,
 
   const float eps_sq = RANSAC_INLIER_THRESH * RANSAC_INLIER_THRESH;
   int best_inliers = 0;
-  float best_cos = 1, best_sin = 0, best_tx = 0, best_ty = 0;
+  float best_a = 1, best_b = 0, best_c = 0, best_d = 1;
+  float best_tx = 0, best_ty = 0;
 
-  /* Seed PRNG from match geometry for deterministic results */
+  /* RANSAC: random 2-point sampling for rigid transform estimation */
   uint32_t rng = 2654435761u;
   for (int i = 0; i < n_matches && i < 8; i++)
     rng ^= (uint32_t)(matches[i].dist * 31 + matches[i].qi * 97 + matches[i].ti * 53);
@@ -378,13 +515,11 @@ ransac_score(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled,
 
   for (int iter = 0; iter < RANSAC_ITERATIONS; iter++)
     {
-      /* Pick two distinct matches at random */
       int i1 = (int)(xorshift32(&rng) % (uint32_t)n_matches);
       int i2 = (int)(xorshift32(&rng) % (uint32_t)(n_matches - 1));
       if (i2 >= i1)
         i2++;
 
-      /* Source (frame) and destination (enrolled) points */
       float p1x = frame->kp[matches[i1].qi].x;
       float p1y = frame->kp[matches[i1].qi].y;
       float p2x = frame->kp[matches[i2].qi].x;
@@ -395,163 +530,49 @@ ransac_score(const SigfmImgInfo *frame, const SigfmImgInfo *enrolled,
       float q2x = enrolled->kp[matches[i2].ti].x;
       float q2y = enrolled->kp[matches[i2].ti].y;
 
-      /* Reject degenerate pairs: source points too close */
-      float dx1 = p2x - p1x;
-      float dy1 = p2y - p1y;
-      float len1_sq = dx1 * dx1 + dy1 * dy1;
+      float ddx = p2x - p1x, ddy = p2y - p1y;
+      float len1_sq = ddx * ddx + ddy * ddy;
       if (len1_sq < RANSAC_MIN_DIST_SQ)
         continue;
 
-      /* Estimate rigid transform: rotation + translation
-       * From correspondences p1→q1, p2→q2:
-       *   cos_θ = (dx1·dx2 + dy1·dy2) / len1²
-       *   sin_θ = (dx1·dy2 - dy1·dx2) / len1²
-       *   tx = q1x - (cos_θ·p1x - sin_θ·p1y)
-       *   ty = q1y - (sin_θ·p1x + cos_θ·p1y)
-       */
-      float dx2 = q2x - q1x;
-      float dy2 = q2y - q1y;
-
-      float cos_t = (dx1 * dx2 + dy1 * dy2) / len1_sq;
-      float sin_t = (dx1 * dy2 - dy1 * dx2) / len1_sq;
-
-      /* Reject if estimated scale deviates too far from 1.0
-       * (pure rotation has cos²+sin² = 1; allow ±20% for noise) */
+      float edx = q2x - q1x, edy = q2y - q1y;
+      float cos_t = (ddx * edx + ddy * edy) / len1_sq;
+      float sin_t = (ddx * edy - ddy * edx) / len1_sq;
       float scale_sq = cos_t * cos_t + sin_t * sin_t;
       if (scale_sq < 0.64f || scale_sq > 1.44f)
         continue;
 
-      float tx = q1x - (cos_t * p1x - sin_t * p1y);
-      float ty = q1y - (sin_t * p1x + cos_t * p1y);
+      float rtx = q1x - (cos_t * p1x - sin_t * p1y);
+      float rty = q1y - (sin_t * p1x + cos_t * p1y);
 
-      /* Count inliers: matches whose transformed position agrees */
-      int inliers = 0;
-      for (int m = 0; m < n_matches; m++)
-        {
-          float px = frame->kp[matches[m].qi].x;
-          float py = frame->kp[matches[m].qi].y;
-          float qx = enrolled->kp[matches[m].ti].x;
-          float qy = enrolled->kp[matches[m].ti].y;
-
-          float pred_x = cos_t * px - sin_t * py + tx;
-          float pred_y = sin_t * px + cos_t * py + ty;
-
-          float ex = pred_x - qx;
-          float ey = pred_y - qy;
-
-          if (ex * ex + ey * ey < eps_sq)
-            inliers++;
-        }
+      int inliers = count_inliers(frame, enrolled, matches, n_matches, cos_t, -sin_t,
+                                  sin_t, cos_t, rtx, rty, eps_sq);
 
       if (inliers > best_inliers)
         {
           best_inliers = inliers;
-          best_cos = cos_t;
-          best_sin = sin_t;
-          best_tx = tx;
-          best_ty = ty;
-          /* Early exit: if most matches are inliers, no need to continue */
+          best_a = cos_t;
+          best_b = -sin_t;
+          best_c = sin_t;
+          best_d = cos_t;
+          best_tx = rtx;
+          best_ty = rty;
           if (best_inliers >= n_matches - 1)
             break;
         }
     }
 
-  /* Least-squares refinement: re-estimate transform from ALL inliers of
-   * the best RANSAC model, then re-count inliers.  This corrects for the
-   * noise in the 2-point estimate and pulls in near-miss genuine inliers
-   * that were just outside the threshold. */
+  /* Least-squares refinement from all inliers of best model */
   if (best_inliers >= 3)
     {
-      /* 1. Compute centroids of inlier correspondences */
-      float cx = 0, cy = 0, dx = 0, dy = 0;
-      int ni = 0;
-      for (int m = 0; m < n_matches; m++)
-        {
-          float px = frame->kp[matches[m].qi].x;
-          float py = frame->kp[matches[m].qi].y;
-          float qx = enrolled->kp[matches[m].ti].x;
-          float qy = enrolled->kp[matches[m].ti].y;
-
-          float pred_x = best_cos * px - best_sin * py + best_tx;
-          float pred_y = best_sin * px + best_cos * py + best_ty;
-          float ex = pred_x - qx;
-          float ey = pred_y - qy;
-
-          if (ex * ex + ey * ey < eps_sq)
-            {
-              cx += px;
-              cy += py;
-              dx += qx;
-              dy += qy;
-              ni++;
-            }
-        }
-      cx /= ni;
-      cy /= ni;
-      dx /= ni;
-      dy /= ni;
-
-      /* 2. Compute optimal rotation via cross-covariance */
-      float sum_cos = 0, sum_sin = 0;
-      for (int m = 0; m < n_matches; m++)
-        {
-          float px = frame->kp[matches[m].qi].x;
-          float py = frame->kp[matches[m].qi].y;
-          float qx = enrolled->kp[matches[m].ti].x;
-          float qy = enrolled->kp[matches[m].ti].y;
-
-          float pred_x = best_cos * px - best_sin * py + best_tx;
-          float pred_y = best_sin * px + best_cos * py + best_ty;
-          float ex = pred_x - qx;
-          float ey = pred_y - qy;
-
-          if (ex * ex + ey * ey < eps_sq)
-            {
-              float pcx = px - cx;
-              float pcy = py - cy;
-              float qcx = qx - dx;
-              float qcy = qy - dy;
-              sum_cos += pcx * qcx + pcy * qcy;
-              sum_sin += pcx * qcy - pcy * qcx;
-            }
-        }
-
-      float norm = sqrtf(sum_cos * sum_cos + sum_sin * sum_sin);
-      if (norm > 1e-6f)
-        {
-          float ref_cos = sum_cos / norm;
-          float ref_sin = sum_sin / norm;
-          float ref_tx = dx - (ref_cos * cx - ref_sin * cy);
-          float ref_ty = dy - (ref_sin * cx + ref_cos * cy);
-
-          /* 3. Re-count inliers with refined transform */
-          int refined = 0;
-          for (int m = 0; m < n_matches; m++)
-            {
-              float px = frame->kp[matches[m].qi].x;
-              float py = frame->kp[matches[m].qi].y;
-              float qx = enrolled->kp[matches[m].ti].x;
-              float qy = enrolled->kp[matches[m].ti].y;
-
-              float pred_x = ref_cos * px - ref_sin * py + ref_tx;
-              float pred_y = ref_sin * px + ref_cos * py + ref_ty;
-              float ex = pred_x - qx;
-              float ey = pred_y - qy;
-              if (ex * ex + ey * ey < eps_sq)
-                refined++;
-            }
-          if (refined > best_inliers)
-            {
-              best_inliers = refined;
-              best_cos = ref_cos;
-              best_sin = ref_sin;
-              best_tx = ref_tx;
-              best_ty = ref_ty;
-            }
-        }
+      float ra, rb, rc, rd, rtx, rty;
+      int refined
+          = ls_refine(frame, enrolled, matches, n_matches, best_a, best_b, best_c, best_d,
+                      best_tx, best_ty, eps_sq, &ra, &rb, &rc, &rd, &rtx, &rty);
+      if (refined > best_inliers)
+        best_inliers = refined;
     }
 
-  /* Final score: inlier count (from refined or best model) */
   return best_inliers;
 }
 
@@ -571,8 +592,89 @@ sigfm_extract(const SigfmPix *pix, int width, int height)
     return NULL;
   box3_blur(pix, blurred, width, height);
 
+  /* --- Scale 0 (full resolution) --- */
   OrbKeypoint raw_kp[MAX_KP];
   int n = detect_keypoints(blurred, width, height, raw_kp, MAX_KP);
+
+  /* --- Scale 1 (half resolution, 2-level pyramid) --- */
+  int hw = width / 2, hh = height / 2;
+  if (hw >= 16 && hh >= 16 && n < MAX_KP)
+    {
+      uint8_t *half = malloc((size_t)(hw * hh));
+      if (half)
+        {
+          downsample_2x(blurred, width, height, half);
+
+          OrbKeypoint half_kp[MAX_KP];
+          int nh = detect_keypoints_ex(half, hw, hh, half_kp, MAX_KP, FAST_BORDER_DETECT);
+
+          /* Map half-res keypoints to full-res coords and merge */
+          for (int i = 0; i < nh && n < MAX_KP; i++)
+            {
+              float fx = half_kp[i].x * 2.0f + 0.5f;
+              float fy = half_kp[i].y * 2.0f + 0.5f;
+
+              /* BRIEF clearance check at full resolution */
+              if ((int)fx < PATCH_HALF || (int)fx >= width - PATCH_HALF
+                  || (int)fy < PATCH_HALF || (int)fy >= height - PATCH_HALF)
+                continue;
+
+              /* Near-duplicate suppression: skip if within 4px of
+               * an existing full-res keypoint */
+              int dup = 0;
+              for (int j = 0; j < n; j++)
+                {
+                  float ddx = raw_kp[j].x - fx;
+                  float ddy = raw_kp[j].y - fy;
+                  if (ddx * ddx + ddy * ddy < MULTISCALE_DUP_DIST_SQ)
+                    {
+                      dup = 1;
+                      break;
+                    }
+                }
+              if (!dup)
+                {
+                  raw_kp[n].x = fx;
+                  raw_kp[n].y = fy;
+                  raw_kp[n].response = half_kp[i].response;
+                  n++;
+                }
+            }
+          free(half);
+        }
+    }
+
+    /* B4: Hessian determinant filter — reject edge-like FAST corners.
+     * |Hxx·Hyy − Hxy²| measures whether the keypoint has strong curvature
+     * in both directions (blob/corner) vs only one (edge). */
+#if HESSIAN_DET_THRESH > 0
+  if (n > 0)
+    {
+      int kept = 0;
+      for (int i = 0; i < n; i++)
+        {
+          int x = (int)raw_kp[i].x;
+          int y = (int)raw_kp[i].y;
+          /* bounds check for 2nd-derivative stencil */
+          if (x < 1 || x >= width - 1 || y < 1 || y >= height - 1)
+            continue;
+          int Ixx = (int)blurred[y * width + x - 1] - 2 * (int)blurred[y * width + x]
+                    + (int)blurred[y * width + x + 1];
+          int Iyy = (int)blurred[(y - 1) * width + x] - 2 * (int)blurred[y * width + x]
+                    + (int)blurred[(y + 1) * width + x];
+          int Ixy4 = (int)blurred[(y - 1) * width + x - 1]
+                     - (int)blurred[(y - 1) * width + x + 1]
+                     - (int)blurred[(y + 1) * width + x - 1]
+                     + (int)blurred[(y + 1) * width + x + 1];
+          /* H = Ixx*Iyy - (Ixy4/4)^2 = (16*Ixx*Iyy - Ixy4^2) / 16
+           * Compare 16*H against 16*threshold to avoid the division. */
+          int H16 = 16 * Ixx * Iyy - Ixy4 * Ixy4;
+          if (H16 >= 16 * HESSIAN_DET_THRESH || H16 <= -16 * HESSIAN_DET_THRESH)
+            raw_kp[kept++] = raw_kp[i];
+        }
+      n = kept;
+    }
+#endif
 
   free(blurred);
 

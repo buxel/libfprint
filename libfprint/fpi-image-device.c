@@ -446,7 +446,7 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
   else if (action == FPI_DEVICE_ACTION_VERIFY)
     {
       FpPrint *template;
-      FpiMatchResult result;
+      FpiMatchResult result = FPI_MATCH_ERROR;
 
       fpi_device_get_verify_data (device, &template);
       if (print)
