@@ -154,13 +154,26 @@ goodixtls5xx_check_firmware_version(FpDevice *dev, gchar *firmware, gpointer use
   FpiDeviceGoodixTls5xxClass *cls
       = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS(FPI_DEVICE_GOODIXTLS5XX(dev));
 
-  if (strcmp(firmware, cls->firmware_version))
+  /* Accept any firmware in the same family (prefix match up to the
+   * last underscore, e.g. "GF_ST411SEC_APP_121xx").  The exact
+   * trailing digits may change across vendor firmware updates without
+   * affecting protocol compatibility. */
+  const gchar *expected = cls->firmware_version;
+  const gchar *sep      = g_strrstr(expected, "_");
+  gsize        prefix_len = sep ? (gsize)(sep - expected + 1) : strlen(expected);
+
+  if (strncmp(firmware, expected, prefix_len) != 0)
     {
       g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                  "Invalid device firmware: \"%s\"", firmware);
+                  "Incompatible device firmware: \"%s\" (expected prefix \"%.*s\")",
+                  firmware, (int)prefix_len, expected);
       fpi_ssm_mark_failed(user_data, error);
       return;
     }
+
+  if (strcmp(firmware, expected) != 0)
+    fp_dbg("Accepted firmware \"%s\" (expected \"%s\", prefix match)",
+           firmware, expected);
 
   fpi_ssm_next_state(user_data);
 }
@@ -170,8 +183,6 @@ goodixtls5xx_check_preset_psk_read(FpDevice *dev, gboolean success, guint32 flag
                                    guint8 *psk, guint16 length, gpointer user_data,
                                    GError *error)
 {
-  g_autofree gchar *psk_str = data_to_str(psk, length);
-
   if (error)
     {
       fpi_ssm_mark_failed(user_data, error);
@@ -186,34 +197,16 @@ goodixtls5xx_check_preset_psk_read(FpDevice *dev, gboolean success, guint32 flag
       return;
     }
 
-  fp_dbg("Device PSK: 0x%s", psk_str);
-  fp_dbg("Device PSK flags: 0x%08x", flags);
-
-  FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS(dev);
-
-  if (flags != cls->psk_flags)
+  if (length == 0 || length > 64)
     {
       g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                  "Invalid device PSK flags: 0x%08x", flags);
+                  "Device PSK has invalid length: %u", length);
       fpi_ssm_mark_failed(user_data, error);
       return;
     }
 
-  if (length != cls->psk_len)
-    {
-      g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Invalid device PSK: 0x%s",
-                  psk_str);
-      fpi_ssm_mark_failed(user_data, error);
-      return;
-    }
-
-  if (memcmp(psk, cls->psk, cls->psk_len))
-    {
-      g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Invalid device PSK: 0x%s",
-                  psk_str);
-      fpi_ssm_mark_failed(user_data, error);
-      return;
-    }
+  g_autofree gchar *psk_str = data_to_str(psk, length);
+  fp_dbg("Device PSK: 0x%s (flags=0x%08x, len=%u)", psk_str, flags, length);
 
   fpi_ssm_next_state(user_data);
 }

@@ -29,8 +29,20 @@
 /* TLS 1.2, DHE-PSK only — matches GF511 firmware expectations */
 #define GOODIX_TLS_PRIORITY "NORMAL:-VERS-ALL:+VERS-TLS1.2:-KX-ALL:+DHE-PSK:+PSK"
 
-/* PSK: 32 zero bytes (unchanged from OpenSSL implementation) */
-static const guint8 goodix_psk[32] = { 0 };
+/* TLS session PSK: 32 zero bytes.
+ *
+ * This is the symmetric key for the GnuTLS PSK-DHE TLS 1.2 handshake
+ * between the host (server) and sensor firmware (client).
+ *
+ * It is completely independent of the "device preset PSK" read via
+ * command 0xe4 — that value is an identity/provisioning token
+ * (SHA-256 of a white-box blob), not a TLS key.
+ *
+ * If a Windows driver or BIOS update has re-provisioned the sensor
+ * with a different TLS PSK, the all-zeros key will not match and the
+ * handshake will fail.  In that case the sensor must be re-provisioned
+ * (e.g. via goodix-fp-dump) to restore the all-zeros TLS PSK. */
+static const guint8 goodix_tls_psk[32] = { 0 };
 
 /* -------------------------------------------------------------------------- */
 /* GnuTLS transport callbacks (in-memory buffers, no sockets/threads)         */
@@ -70,12 +82,12 @@ tls_push_func(gnutls_transport_ptr_t ptr, const void *buf, size_t len)
 static int
 tls_psk_server_cb(gnutls_session_t session, const char *username, gnutls_datum_t *key)
 {
-  key->data = gnutls_malloc(sizeof(goodix_psk));
+  key->data = gnutls_malloc(sizeof(goodix_tls_psk));
   if (!key->data)
     return GNUTLS_E_MEMORY_ERROR;
 
-  memcpy(key->data, goodix_psk, sizeof(goodix_psk));
-  key->size = sizeof(goodix_psk);
+  memcpy(key->data, goodix_tls_psk, sizeof(goodix_tls_psk));
+  key->size = sizeof(goodix_tls_psk);
   return 0;
 }
 

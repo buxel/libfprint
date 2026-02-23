@@ -79,11 +79,6 @@ struct _FpiDeviceGoodixTls5xxClass
   const char
       *firmware_version; ///< only needed if goodixtls5xx_check_firmware_version() is used
 
-  /// only needed if goodixtls5xx_check_preset_psk_read() is used
-  int psk_flags;
-  guint16 psk_len;
-  const guint8 *psk;
-
   int reset_number; ///< only needed if goodixtls5xx_check_reset() is used
 };
 

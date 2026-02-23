@@ -287,9 +287,6 @@ fpi_device_goodixtls511_class_init(FpiDeviceGoodixTls511Class *class)
   xx_cls->process_frame = crop_frame;
   xx_cls->scan_height = GOODIX511_HEIGHT;
   xx_cls->scan_width = GOODIX511_SCAN_WIDTH;
-  xx_cls->psk = goodix_511_psk_0;
-  xx_cls->psk_flags = GOODIX_511_PSK_FLAGS;
-  xx_cls->psk_len = sizeof(goodix_511_psk_0);
   xx_cls->firmware_version = GOODIX_511_FIRMWARE_VERSION;
   xx_cls->reset_number = GOODIX_511_RESET_NUMBER;
 
