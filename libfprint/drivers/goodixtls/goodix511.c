@@ -150,6 +150,10 @@ read_otp_callback(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
   fpi_ssm_start_subsm(ssm, otp_ssm);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Activation state machine                                                   */
+/* -------------------------------------------------------------------------- */
+
 static void
 activate_run_state(FpiSsm *ssm, FpDevice *dev)
 {

@@ -29,19 +29,12 @@
 /* TLS 1.2, DHE-PSK only — matches GF511 firmware expectations */
 #define GOODIX_TLS_PRIORITY "NORMAL:-VERS-ALL:+VERS-TLS1.2:-KX-ALL:+DHE-PSK:+PSK"
 
-/* TLS session PSK: 32 zero bytes.
+/* TLS session PSK: the symmetric key for the GnuTLS PSK-DHE TLS 1.2
+ * handshake between the host (server) and sensor firmware (client).
  *
- * This is the symmetric key for the GnuTLS PSK-DHE TLS 1.2 handshake
- * between the host (server) and sensor firmware (client).
- *
- * It is completely independent of the "device preset PSK" read via
- * command 0xe4 — that value is an identity/provisioning token
- * (SHA-256 of a white-box blob), not a TLS key.
- *
- * If a Windows driver or BIOS update has re-provisioned the sensor
- * with a different TLS PSK, the all-zeros key will not match and the
- * handshake will fail.  In that case the sensor must be re-provisioned
- * (e.g. via goodix-fp-dump) to restore the all-zeros TLS PSK. */
+ * This is the all-zeros "factory default" PSK.  The sensor must have
+ * been provisioned with this key (via goodix-fp-dump or equivalent)
+ * for TLS to succeed. */
 static const guint8 goodix_tls_psk[32] = { 0 };
 
 /* -------------------------------------------------------------------------- */

@@ -216,30 +216,6 @@ void
 goodixtls5xx_init_tls(FpDevice *dev);
 
 /**
- * @brief Save an image to pgm
- * @details Designed for debugging purposes, shouldn't be used in a non-debug code path
- *
- * @param img
- * @param path
- * @return gboolean
- */
-gboolean
-goodixtls5xx_save_image_to_pgm(FpImage *img, const char *path);
-
-/**
- * @brief Squashes the 2 byte pixels of a raw frame into the 1 byte pixels used
- * by libfprint.
- * @details Borrowed from the elan driver. We reduce frames to
- * within the max and min.
- *
- * @param frame
- * @param squashed
- */
-void
-goodixtls5xx_squash_frame_linear(GoodixTls5xxPix *frame, guint8 *squashed,
-                                 guint16 frame_size);
-
-/**
  * @brief Cleans up the state after activation. If you replaced the deactivate callback
  * then you will need to call this, otherwise don't worry its done for you
  *

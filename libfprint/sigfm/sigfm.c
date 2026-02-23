@@ -164,7 +164,6 @@ fast9_score(const uint8_t *img, int w, int x, int y, int threshold)
 #define FAST_BORDER_DETECT 4         /* FAST radius 3 + 1 for NMS only */
 #define MAX_KP 128
 #define MULTISCALE_DUP_DIST_SQ 16.0f /* 4px near-duplicate suppression */
-#define HESSIAN_DET_THRESH 0         /* B4: filter weak corners (0=disabled) */
 
 static int
 detect_keypoints_ex(const uint8_t *img, int w, int h, OrbKeypoint *kp_out, int max_kp,
@@ -643,38 +642,6 @@ sigfm_extract(const SigfmPix *pix, int width, int height)
           free(half);
         }
     }
-
-    /* B4: Hessian determinant filter — reject edge-like FAST corners.
-     * |Hxx·Hyy − Hxy²| measures whether the keypoint has strong curvature
-     * in both directions (blob/corner) vs only one (edge). */
-#if HESSIAN_DET_THRESH > 0
-  if (n > 0)
-    {
-      int kept = 0;
-      for (int i = 0; i < n; i++)
-        {
-          int x = (int)raw_kp[i].x;
-          int y = (int)raw_kp[i].y;
-          /* bounds check for 2nd-derivative stencil */
-          if (x < 1 || x >= width - 1 || y < 1 || y >= height - 1)
-            continue;
-          int Ixx = (int)blurred[y * width + x - 1] - 2 * (int)blurred[y * width + x]
-                    + (int)blurred[y * width + x + 1];
-          int Iyy = (int)blurred[(y - 1) * width + x] - 2 * (int)blurred[y * width + x]
-                    + (int)blurred[(y + 1) * width + x];
-          int Ixy4 = (int)blurred[(y - 1) * width + x - 1]
-                     - (int)blurred[(y - 1) * width + x + 1]
-                     - (int)blurred[(y + 1) * width + x - 1]
-                     + (int)blurred[(y + 1) * width + x + 1];
-          /* H = Ixx*Iyy - (Ixy4/4)^2 = (16*Ixx*Iyy - Ixy4^2) / 16
-           * Compare 16*H against 16*threshold to avoid the division. */
-          int H16 = 16 * Ixx * Iyy - Ixy4 * Ixy4;
-          if (H16 >= 16 * HESSIAN_DET_THRESH || H16 <= -16 * HESSIAN_DET_THRESH)
-            raw_kp[kept++] = raw_kp[i];
-        }
-      n = kept;
-    }
-#endif
 
   free(blurred);
 

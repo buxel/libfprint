@@ -33,7 +33,6 @@
 
 typedef struct
 {
-  guint8 *otp; // TODO: Remove
   GoodixTls5xxPix *calibration_img;
   SigfmImgInfo    *last_sigfm_info;
 } FpiDeviceGoodixTls5xxPrivate;
@@ -290,7 +289,7 @@ goodixtls5xx_check_powerdown_scan_freq(FpDevice *dev, gboolean success,
     }
 }
 
-void
+static void
 goodixtls5xx_squash_frame_linear(GoodixTls5xxPix *frame, guint8 *squashed,
                                  guint16 frame_size)
 {
@@ -652,42 +651,6 @@ goodixtls5xx_decode_frame(GoodixTls5xxPix *frame, guint32 frame_size,
     }
 }
 
-gboolean
-goodixtls5xx_save_image_to_pgm(FpImage *img, const char *path)
-{
-  FILE *fd = fopen(path, "w");
-  size_t write_size;
-  const guchar *data = fp_image_get_data(img, &write_size);
-  int r;
-
-  if (!fd)
-    {
-      g_warning("could not open '%s' for writing: %d", path, errno);
-      return FALSE;
-    }
-
-  r = fprintf(fd, "P5 %d %d 255\n", fp_image_get_width(img), fp_image_get_height(img));
-  if (r < 0)
-    {
-      fclose(fd);
-      g_critical("pgm header write failed, error %d", r);
-      return FALSE;
-    }
-
-  r = fwrite(data, 1, write_size, fd);
-  if (r < write_size)
-    {
-      fclose(fd);
-      g_critical("short write (%d)", r);
-      return FALSE;
-    }
-
-  fclose(fd);
-  g_debug("written to '%s'", path);
-
-  return TRUE;
-}
-
 static void
 dev_change_state(FpImageDevice *img_dev, FpiImageDeviceState state)
 {
@@ -924,7 +887,6 @@ fpi_device_goodixtls5xx_init(FpiDeviceGoodixTls5xx *self)
 {
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(self);
   priv->calibration_img = NULL;
-  priv->otp = NULL;
   priv->last_sigfm_info = NULL;
 }
 
