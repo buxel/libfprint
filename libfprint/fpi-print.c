@@ -211,11 +211,11 @@ fpi_print_add_from_image (FpPrint *print,
 
 /**
  * fpi_print_add_data:
- * @print: A #FpPrint of type #FPI_PRINT_SIGFM
- * @data: (transfer none): Opaque serialized print data (will be ref'd)
+ * @print: A #FpPrint of type %FPI_PRINT_SIGFM
+ * @data: (transfer none) (not nullable): Opaque serialized print data
  *
- * Adds a reference to @data to @print. The print must already have its
- * type set to a type that uses opaque data blobs (e.g. #FPI_PRINT_SIGFM).
+ * Adds a reference to @data to the internal array of @print.
+ * The print must already have its type set to %FPI_PRINT_SIGFM.
  */
 void
 fpi_print_add_data (FpPrint *print,
@@ -229,12 +229,13 @@ fpi_print_add_data (FpPrint *print,
 
 /**
  * fpi_print_get_data_array:
- * @print: A #FpPrint of type #FPI_PRINT_SIGFM
+ * @print: A #FpPrint of type %FPI_PRINT_SIGFM
  *
- * Returns the internal array of opaque data blobs (each element is a #GBytes)
- * for a print that uses opaque data storage.
+ * Returns the internal array of opaque data blobs (each element is a
+ * #GBytes) for a print that uses opaque data storage.
  *
- * Returns: (transfer none) (element-type GBytes): The array of data entries
+ * Returns: (transfer none) (element-type GBytes) (nullable): The array
+ *   of data entries, or %NULL if @print is not of type %FPI_PRINT_SIGFM
  */
 GPtrArray *
 fpi_print_get_data_array (FpPrint *print)

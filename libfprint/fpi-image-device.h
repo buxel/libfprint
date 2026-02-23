@@ -85,6 +85,17 @@ typedef enum {
  * @change_state: Notification about the current device state (i.e. waiting for
  *   finger or image capture). Implementing this is optional, it can e.g. be
  *   used to flash an LED when waiting for a finger.
+ * @extract: (nullable): Optional custom feature extraction. When set, the
+ *   driver receives the captured #FpImage and must call
+ *   fpi_image_device_extract_complete() when finished. If %NULL, the default
+ *   NBIS minutiae extraction is used.
+ * @build_print: (nullable): Optional custom print builder. When set, the
+ *   driver populates @print from extracted features instead of the default
+ *   NBIS minutiae path. Returns %TRUE on success, %FALSE on error (with
+ *   @error set).
+ * @compare: (nullable): Optional custom matcher. When set, the driver
+ *   compares @enrolled against @probe and returns a #FpiMatchResult.
+ *   If %NULL, the default bz3 matcher is used.
  *
  * These are the main entry points for drivers to implement. Drivers may not
  * implement all of these entry points if they do not support the operation
@@ -116,13 +127,8 @@ struct _FpImageDeviceClass
                                            FpiImageDeviceState state);
   void                    (*deactivate)   (FpImageDevice *dev);
 
-  /* Optional vfuncs for custom feature extraction and matching.
-   * If extract is set, the driver is responsible for calling
-   * fpi_image_device_extract_complete() when feature extraction finishes.
-   * If build_print is set, the driver creates the FpPrint from extracted
-   * features rather than using the default NBIS minutiae path.
-   * If compare is set, the driver performs matching rather than bz3_match.
-   */
+  /*< private >*/
+  /* Optional vfuncs for custom feature extraction and matching. */
   void                    (*extract)      (FpImageDevice  *dev,
                                            FpImage        *image);
   gboolean                (*build_print)  (FpImageDevice  *dev,
