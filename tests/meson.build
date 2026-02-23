@@ -59,6 +59,10 @@ drivers_tests = [
 	'realtek',
 	'realtek-5816',
     'focaltech_moc',
+    # goodixtls511 — requires custom.pcapng + device recorded from hardware.
+    # See tests/goodixtls511/README.md for recording instructions.
+    # Uncomment once test data has been captured:
+    # 'goodixtls511',
 ]
 
 if get_option('introspection')
