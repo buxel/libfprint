@@ -1,17 +1,5 @@
 #!/usr/bin/python3
 
-"""
-Umockdev-based test for the goodixtls511 (Goodix GF511 / 27c6:5110) driver.
-
-This is an FpImageDevice with SIGFM (Signal-Feature Matching) for
-on-host template matching.  The test exercises:
-  1. Device open / feature flag validation
-  2. Enroll (20-stage image capture → SIGFM feature extraction → print build)
-  3. Verify (single capture → SIGFM compare against enrolled print)
-  4. Print serialization round-trip
-  5. Device close
-"""
-
 import traceback
 import sys
 import gi
@@ -71,18 +59,12 @@ p2 = FPrint.Print.deserialize(serialized)
 assert p2 is not None
 
 # -- Verify (match) -----------------------------------------------------------
-# SIGFM has a non-trivial FRR (~30%), so retry up to 3 times to get a
-# successful match during recording.  During replay the captured session
-# is deterministic, so only the last (successful) attempt matters.
-for attempt in range(1, 6):
-    print(f"verifying (attempt {attempt}/5)")
-    assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-    verify_res, verify_print = d.verify_sync(p)
-    assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-    print(f"verify attempt {attempt}: match={verify_res}")
-    if verify_res:
-        break
-assert verify_res == True, "Verify failed after 5 attempts — try better finger placement"
+print("verifying")
+assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+verify_res, verify_print = d.verify_sync(p)
+assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+print("verify done")
+assert verify_res == True
 
 # -- Close device --------------------------------------------------------------
 d.close_sync()

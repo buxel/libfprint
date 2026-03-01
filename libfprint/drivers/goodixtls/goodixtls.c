@@ -31,6 +31,12 @@
 /* TLS 1.2, DHE-PSK only — matches GF511 firmware expectations */
 #define GOODIX_TLS_PRIORITY "NORMAL:-VERS-ALL:+VERS-TLS1.2:-KX-ALL:+DHE-PSK:+PSK"
 
+/* Under FP_DEVICE_EMULATION: use PSK-only (no DHE) so that no ephemeral
+ * DH private key is generated.  Combined with a fixed server random this
+ * makes the TLS handshake fully deterministic for umockdev pcap replay. */
+#define GOODIX_TLS_PRIORITY_EMULATED \
+  "NORMAL:-VERS-ALL:+VERS-TLS1.2:-KX-ALL:+PSK"
+
 /* TLS session PSK: the symmetric key for the GnuTLS PSK-DHE TLS 1.2
  * handshake between the host (server) and sensor firmware (client).
  *
@@ -40,19 +46,14 @@
 static const guint8 goodix_tls_psk[32] = { 0 };
 
 /* Fixed server random used under FP_DEVICE_EMULATION to make the
- * ServerHello deterministic for pcap record/replay.
- *
- * NOTE: The DHE key exchange also generates a random ephemeral DH
- * private key via gnutls_rnd().  Full pcap-replay determinism
- * additionally requires an LD_PRELOAD shim (see
- * tests/goodixtls511/getrandom-seed.c) that makes getrandom()
- * deterministic.  The fixed server random alone is NOT sufficient. */
+ * ServerHello deterministic for pcap record/replay. */
 static const guint8 emulated_server_random[32] = {
   0x54, 0x45, 0x53, 0x54, 0x00, 0x01, 0x02, 0x03,
   0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
   0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
   0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
 };
+
 
 /* -------------------------------------------------------------------------- */
 /* GnuTLS transport callbacks (in-memory buffers, no sockets/threads)         */
@@ -110,6 +111,8 @@ goodix_tls_server_init(GoodixTlsServer *self, GError **error)
 {
   int r;
   gboolean emulation = g_strcmp0 (g_getenv ("FP_DEVICE_EMULATION"), "1") == 0;
+  const char *priority = emulation ? GOODIX_TLS_PRIORITY_EMULATED
+                                   : GOODIX_TLS_PRIORITY;
 
   self->in_buf = g_byte_array_new();
   self->out_buf = g_byte_array_new();
@@ -134,7 +137,7 @@ goodix_tls_server_init(GoodixTlsServer *self, GError **error)
       return FALSE;
     }
 
-  r = gnutls_priority_set_direct(self->session, GOODIX_TLS_PRIORITY, NULL);
+  r = gnutls_priority_set_direct(self->session, priority, NULL);
   if (r < 0)
     {
       g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "gnutls_priority_set_direct: %s",
@@ -147,16 +150,18 @@ goodix_tls_server_init(GoodixTlsServer *self, GError **error)
   gnutls_credentials_set(self->session, GNUTLS_CRD_PSK, self->creds);
 
   /* Under emulation, fix the server random so the ServerHello is
-   * identical across record and replay runs. */
+   * byte-identical across record and replay runs.  The remaining
+   * random bytes (session_id, etc.) are made deterministic by the
+   * getrandom-seed LD_PRELOAD shim loaded by tests/meson.build. */
   if (emulation)
     {
-      gnutls_datum_t datum = {
+      gnutls_datum_t rand_datum = {
         .data = (unsigned char *) emulated_server_random,
         .size = sizeof (emulated_server_random),
       };
-      gnutls_handshake_set_random (self->session, &datum);
-      fp_dbg ("FP_DEVICE_EMULATION: using fixed server random for "
-              "deterministic TLS ServerHello");
+      gnutls_handshake_set_random (self->session, &rand_datum);
+      fp_dbg ("FP_DEVICE_EMULATION: using deterministic TLS (PSK-only, "
+              "fixed server random)");
     }
 
   gnutls_transport_set_ptr(self->session, self);

@@ -62,16 +62,6 @@ drivers_tests = [
     'goodixtls511',
 ]
 
-# Deterministic getrandom() shim for TLS-based driver tests (goodixtls511).
-# Replaces getrandom()/getentropy() with a fixed-seed PRNG when
-# FP_DEVICE_EMULATION=1, so the DHE-PSK handshake produces identical bytes
-# across pcap recording and replay.
-getrandom_seed = shared_library('getrandom-seed',
-    'goodixtls511/getrandom-seed.c',
-    dependencies: [dependency('gnutls'), cc.find_library('dl')],
-    install: false,
-)
-
 if get_option('introspection')
   conf = configuration_data()
   conf.set('SRCDIR', meson.project_source_root())
@@ -177,23 +167,22 @@ if get_option('introspection')
     endforeach
 
     driver_tests_enabled = false
+
+    # Deterministic RNG shim for pcap-replay driver tests.
+    # Under FP_DEVICE_EMULATION=1 + LD_PRELOAD this replaces gnutls_rnd()
+    # with a simple counter so that TLS handshake bytes are byte-identical
+    # across record and replay runs.  When FP_DEVICE_EMULATION is unset
+    # the shim passes through to the real implementation.
+    getrandom_seed = shared_library('getrandom-seed',
+        'getrandom-seed.c',
+        dependencies: [cc.find_library('dl', required: false)],
+    )
+
     foreach driver_test: drivers_tests
         driver_name = driver_test.split('-')[0]
         driver_envs = envs
         driver_envs.set('FP_DRIVERS_ALLOWLIST', driver_name)
-
-        # goodixtls511 needs a deterministic RNG for TLS replay and
-        # must downgrade fatal-warnings to fatal-criticals because the
-        # upstream image-device layer emits a benign warning during
-        # deactivation after the final enrollment stage.
-        driver_test_deps = libfprint_typelib
-        if driver_test == 'goodixtls511'
-            driver_envs.prepend('LD_PRELOAD', getrandom_seed.full_path())
-            driver_envs.set('G_DEBUG', 'fatal-criticals')
-            driver_test_deps = [libfprint_typelib, getrandom_seed]
-        else
-            driver_envs.set('G_DEBUG', 'fatal-warnings')
-        endif
+        driver_envs.prepend('LD_PRELOAD', getrandom_seed.full_path())
 
         if (driver_name in supported_drivers and
             gusb_dep.version().version_compare('>= 0.3.0'))
@@ -207,7 +196,7 @@ if get_option('introspection')
                 env: driver_envs,
                 suite: ['drivers'],
                 timeout: 15,
-                depends: driver_test_deps,
+                depends: [libfprint_typelib, getrandom_seed],
             )
 
             if installed_tests

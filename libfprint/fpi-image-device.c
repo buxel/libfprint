@@ -371,7 +371,12 @@ fpi_image_device_extract_complete (FpImageDevice *self,
       if (priv->enroll_stage == fp_device_get_nr_enroll_stages (device))
         {
           fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
-          fpi_image_device_deactivate (self, FALSE);
+          /* Pass cancelling=TRUE: the device may still be in
+           * AWAIT_FINGER_OFF if extraction finished before the
+           * finger was lifted (happens with fast pipelines like
+           * SIGFM).  The transition is valid — avoid a spurious
+           * g_warning about non-idle deactivation. */
+          fpi_image_device_deactivate (self, TRUE);
         }
       else
         {
