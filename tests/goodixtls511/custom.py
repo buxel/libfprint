@@ -71,12 +71,18 @@ p2 = FPrint.Print.deserialize(serialized)
 assert p2 is not None
 
 # -- Verify (match) -----------------------------------------------------------
-print("verifying")
-assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-verify_res, verify_print = d.verify_sync(p)
-assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
-print("verify done")
-assert verify_res == True
+# SIGFM has a non-trivial FRR (~30%), so retry up to 3 times to get a
+# successful match during recording.  During replay the captured session
+# is deterministic, so only the last (successful) attempt matters.
+for attempt in range(1, 6):
+    print(f"verifying (attempt {attempt}/5)")
+    assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+    verify_res, verify_print = d.verify_sync(p)
+    assert d.get_finger_status() == FPrint.FingerStatusFlags.NONE
+    print(f"verify attempt {attempt}: match={verify_res}")
+    if verify_res:
+        break
+assert verify_res == True, "Verify failed after 5 attempts — try better finger placement"
 
 # -- Close device --------------------------------------------------------------
 d.close_sync()

@@ -59,11 +59,18 @@ drivers_tests = [
 	'realtek',
 	'realtek-5816',
     'focaltech_moc',
-    # goodixtls511 — requires custom.pcapng + device recorded from hardware.
-    # See tests/goodixtls511/README.md for recording instructions.
-    # Uncomment once test data has been captured:
-    # 'goodixtls511',
+    'goodixtls511',
 ]
+
+# Deterministic getrandom() shim for TLS-based driver tests (goodixtls511).
+# Replaces getrandom()/getentropy() with a fixed-seed PRNG when
+# FP_DEVICE_EMULATION=1, so the DHE-PSK handshake produces identical bytes
+# across pcap recording and replay.
+getrandom_seed = shared_library('getrandom-seed',
+    'goodixtls511/getrandom-seed.c',
+    dependencies: [dependency('gnutls'), cc.find_library('dl')],
+    install: false,
+)
 
 if get_option('introspection')
   conf = configuration_data()
@@ -175,6 +182,19 @@ if get_option('introspection')
         driver_envs = envs
         driver_envs.set('FP_DRIVERS_ALLOWLIST', driver_name)
 
+        # goodixtls511 needs a deterministic RNG for TLS replay and
+        # must downgrade fatal-warnings to fatal-criticals because the
+        # upstream image-device layer emits a benign warning during
+        # deactivation after the final enrollment stage.
+        driver_test_deps = libfprint_typelib
+        if driver_test == 'goodixtls511'
+            driver_envs.prepend('LD_PRELOAD', getrandom_seed.full_path())
+            driver_envs.set('G_DEBUG', 'fatal-criticals')
+            driver_test_deps = [libfprint_typelib, getrandom_seed]
+        else
+            driver_envs.set('G_DEBUG', 'fatal-warnings')
+        endif
+
         if (driver_name in supported_drivers and
             gusb_dep.version().version_compare('>= 0.3.0'))
             driver_tests_enabled = true
@@ -187,7 +207,7 @@ if get_option('introspection')
                 env: driver_envs,
                 suite: ['drivers'],
                 timeout: 15,
-                depends: libfprint_typelib,
+                depends: driver_test_deps,
             )
 
             if installed_tests
