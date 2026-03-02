@@ -714,28 +714,6 @@ fp_print_serialize (FpPrint *print,
       g_variant_builder_close (&nested);
       g_variant_builder_add (&builder, "v", g_variant_builder_end (&nested));
     }
-  else if (print->type == FPI_PRINT_SIGFM)
-    {
-      GVariantBuilder nested =
-        G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE ("(a(ay))"));
-      guint i;
-
-      g_variant_builder_open (&nested, G_VARIANT_TYPE ("a(ay)"));
-      for (i = 0; i < print->prints->len; i++)
-        {
-          GBytes *entry = g_ptr_array_index (print->prints, i);
-          gsize slen;
-          const guchar *blob = g_bytes_get_data (entry, &slen);
-
-          g_variant_builder_open (&nested, G_VARIANT_TYPE ("(ay)"));
-          g_variant_builder_add_value (
-            &nested, g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
-                                                blob, slen, 1));
-          g_variant_builder_close (&nested);
-        }
-      g_variant_builder_close (&nested);
-      g_variant_builder_add (&builder, "v", g_variant_builder_end (&nested));
-    }
   else
     {
       g_variant_builder_add (&builder, "v", g_variant_new_variant (print->data));
@@ -890,36 +868,6 @@ fp_print_deserialize (const guchar *data,
           memcpy (xyt->thetacol, thetacol, sizeof (xcol[0]) * xlen);
 
           g_ptr_array_add (result->prints, g_steal_pointer (&xyt));
-        }
-    }
-  else if (type == FPI_PRINT_SIGFM)
-    {
-      g_autoptr(GVariant) prints = g_variant_get_child_value (print_data, 0);
-      guint i;
-
-      result = g_object_new (FP_TYPE_PRINT, "driver", driver, "device-id",
-                             device_id, "device-stored", device_stored, NULL);
-      g_object_ref_sink (result);
-      fpi_print_set_type (result, FPI_PRINT_SIGFM);
-
-      for (i = 0; i < g_variant_n_children (prints); i++)
-        {
-          g_autoptr(GVariant) entry_data = NULL;
-          GVariant *child;
-          gsize slen;
-          const guchar *blob;
-          GBytes *entry;
-
-          entry_data = g_variant_get_child_value (prints, i);
-
-          child = g_variant_get_child_value (entry_data, 0);
-          blob =
-            g_variant_get_fixed_array (child, &slen, sizeof (guchar));
-
-          entry = g_bytes_new (blob, slen);
-          g_variant_unref (child);
-
-          g_ptr_array_add (result->prints, entry);
         }
     }
   else if (type == FPI_PRINT_RAW)

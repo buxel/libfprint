@@ -23,6 +23,7 @@
 #pragma once
 
 #include "drivers_api.h"
+#include "fpi-ssm.h"
 #include "goodix.h"
 
 #define FPI_TYPE_DEVICE_GOODIXTLS5XX (fpi_device_goodixtls5xx_get_type())
@@ -36,7 +37,7 @@ G_DECLARE_DERIVABLE_TYPE(FpiDeviceGoodixTls5xx, fpi_device_goodixtls5xx, FPI,
  * drivers for the goodixtls 5xx (usb) devices. For an example out goodix511.c.
  *
  * @par The bare minimum needed is to provide get_mcu_cfg and process_frame to
- * FpiDeviceGoodixTls5xxClass and activate to FpImageDeviceClass (activate
+ * FpiDeviceGoodixTls5xxClass and activate to the 5xx class (activate
  * varies from device to device)
  *
  * @par There are also quite a few helper functions in the goodixtls5xx_*
@@ -65,6 +66,7 @@ typedef struct
 typedef FpImage *(*GoodixTls5xxProcessFrameFn)(guint8 *pix);
 typedef GoodixTls5xxMcuConfig (*GoodixTls5xxGetMcuFn)(void);
 typedef void (*GoodixTls5xxResetStateFn)(FpDevice *);
+typedef void (*GoodixTls5xxActivateFn)(FpDevice *dev, FpiSsm *parent_ssm);
 
 struct _FpiDeviceGoodixTls5xxClass
 {
@@ -74,6 +76,7 @@ struct _FpiDeviceGoodixTls5xxClass
   GoodixTls5xxProcessFrameFn
       process_frame; /**< process a frame after it is decoded (e.g. crop it) */
   GoodixTls5xxResetStateFn reset_state; /**< callback to reset the state, may be NULL */
+  GoodixTls5xxActivateFn activate; /**< run device-specific activation as sub-SSM of parent */
 
   guint16 scan_width;  /**< width of the raw scanner image */
   guint16 scan_height; /**< height of the raw scanner image */
@@ -185,16 +188,6 @@ goodixtls5xx_check_none_cmd(FpDevice *dev, guint8 *data, guint16 len, gpointer s
                             GError *err);
 
 /**
- * @brief Start a scan
- * @note This is called automatically for you unless you overwrote change_state in
- * FpImageDeviceClass
- *
- * @param dev
- */
-void
-goodixtls5xx_scan_start(FpiDeviceGoodixTls5xx *dev);
-
-/**
  * @brief Decode a goodixtls frame
  * @details Decodes the weird 4/6 byte packing:
  * https://blog.th0m.as/misc/fingerprint-reversing/
@@ -210,30 +203,19 @@ goodixtls5xx_decode_frame(GoodixTls5xxPix *frame, guint32 frame_size,
 
 /**
  * @brief Initalise the TLS for the device
- * @note You probably want to call this directly after device activation
+ * @note Called from the enroll/verify SSM after activation completes
  *
  * @param dev
+ * @param ssm  The SSM to advance on completion
  */
 void
-goodixtls5xx_init_tls(FpDevice *dev);
+goodixtls5xx_init_tls(FpDevice *dev, FpiSsm *ssm);
 
 /**
- * @brief Cleans up the state after activation. If you replaced the deactivate callback
- * then you will need to call this, otherwise don't worry its done for you
+ * @brief Cleans up the state after activation. Called during deactivation
+ * at the end of each enroll/verify operation.
  *
  * @param dev device to cleanup the state for
  */
 void
 goodixtls5xx_cleanup(FpiDeviceGoodixTls5xx *dev);
-
-/* SIGFM vfunc implementations for FpImageDeviceClass */
-void         goodix_sigfm_extract     (FpImageDevice  *self,
-                                       FpImage        *image);
-gboolean     goodix_sigfm_build_print (FpImageDevice  *self,
-                                       FpPrint        *print,
-                                       FpImage        *image,
-                                       GError        **error);
-FpiMatchResult goodix_sigfm_compare   (FpImageDevice  *self,
-                                       FpPrint        *enrolled,
-                                       FpPrint        *probe,
-                                       GError        **error);

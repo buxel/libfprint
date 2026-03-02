@@ -24,12 +24,10 @@
 
 #include "drivers/goodixtls/goodix5xx.h"
 #include "drivers_api.h"
-#include "fp-image-device.h"
-#include "fpi-image-device.h"
 #include "fpi-print.h"
 #include "fpi-ssm.h"
 #include "goodix.h"
-#include "sigfm/sigfm.h"
+#include "sigfm.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -38,6 +36,15 @@ typedef struct
 {
   GoodixTls5xxPix *calibration_img;
   SigfmImgInfo    *last_sigfm_info;
+  FpImage         *last_image;
+
+  /* Enroll state */
+  gint             enroll_stage;
+  GPtrArray       *enroll_data;    /* array of GBytes* (serialized descriptors) */
+  gboolean         last_scan;     /* TRUE on last enroll scan — skip FDT_UP wait */
+
+  /* Task SSM (active enroll/verify/identify) */
+  FpiSsm          *task_ssm;
 } FpiDeviceGoodixTls5xxPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(FpiDeviceGoodixTls5xx, fpi_device_goodixtls5xx,
@@ -458,8 +465,6 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
       return;
     }
 
-  FpImageDevice *img_dev = FP_IMAGE_DEVICE(dev);
-
   FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX(dev);
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(self);
   FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS(dev);
@@ -565,13 +570,14 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
         fp_dbg("rejecting low-quality frame (stddev %d < %d)", stddev,
                QUALITY_STDDEV_MIN);
         g_object_unref(img);
-        fpi_image_device_retry_scan(img_dev, FP_DEVICE_RETRY_CENTER_FINGER);
+        g_clear_object(&priv->last_image);
         fpi_ssm_next_state(ssm);
         return;
       }
   }
 
-  fpi_image_device_image_captured(img_dev, img);
+  g_clear_object(&priv->last_image);
+  priv->last_image = img;
 
   fpi_ssm_next_state(ssm);
 }
@@ -597,8 +603,6 @@ scan_get_img(FpDevice *dev, FpiSsm *ssm)
 static void
 scan_run_state(FpiSsm *ssm, FpDevice *dev)
 {
-  FpImageDevice *img_dev = FP_IMAGE_DEVICE(dev);
-
   switch (fpi_ssm_get_cur_state(ssm))
     {
     case SCAN_STAGE_QUERY_MCU:
@@ -616,38 +620,47 @@ scan_run_state(FpiSsm *ssm, FpDevice *dev)
       break;
 
     case SCAN_STAGE_GET_IMG:
-      fpi_image_device_report_finger_status(img_dev, TRUE);
+      fpi_device_report_finger_status_changes(dev,
+                                              FP_FINGER_STATUS_PRESENT,
+                                              FP_FINGER_STATUS_NEEDED);
       scan_get_img(dev, ssm);
       break;
 
     case SCAN_STAGE_SWITCH_TO_FTD_UP:
-      send_switch_mode(dev, ssm, goodix_send_mcu_switch_to_fdt_up);
-      break;
+      {
+        FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX (dev);
+        FpiDeviceGoodixTls5xxPrivate *priv =
+          fpi_device_goodixtls5xx_get_instance_private (self);
+
+        if (priv->last_scan)
+          {
+            /* Fire-and-forget: send FDT_UP but don't wait for the
+             * ACK/NOTIF. The original FpImageDevice driver's deactivation
+             * called goodix_reset_state() before the response arrived,
+             * then immediately started re-activation.  Reproduce that
+             * sequence so the pcap replay matches. */
+            FpiDeviceGoodixTls5xxClass *cls =
+              FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
+            GoodixTls5xxMcuConfig cfg = cls->get_mcu_cfg ();
+            goodix_send_mcu_switch_to_fdt_up (dev, cfg.data, cfg.data_len,
+                                              cfg.free_fn, NULL, NULL);
+            goodix_reset_state (dev);
+            fpi_ssm_next_state (ssm);
+          }
+        else
+          {
+            send_switch_mode (dev, ssm, goodix_send_mcu_switch_to_fdt_up);
+          }
+        break;
+      }
 
     case SCAN_STAGE_SWITCH_TO_FTD_DONE:
-      fpi_image_device_report_finger_status(img_dev, FALSE);
+      fpi_device_report_finger_status_changes(dev,
+                                              FP_FINGER_STATUS_NONE,
+                                              FP_FINGER_STATUS_PRESENT);
       fpi_ssm_next_state(ssm);
       break;
     }
-}
-
-static void
-scan_complete(FpiSsm *ssm, FpDevice *dev, GError *error)
-{
-  if (error)
-    {
-      fp_err("failed to scan: %s (code: %d)", error->message, error->code);
-      fpi_image_device_session_error(FP_IMAGE_DEVICE(dev), error);
-      return;
-    }
-  fp_dbg("finished scan");
-}
-
-void
-goodixtls5xx_scan_start(FpiDeviceGoodixTls5xx *dev)
-{
-  fpi_ssm_start(fpi_ssm_new(FP_DEVICE(dev), scan_run_state, SCAN_STAGE_NUM),
-                scan_complete);
 }
 
 void
@@ -666,76 +679,84 @@ goodixtls5xx_decode_frame(GoodixTls5xxPix *frame, guint32 frame_size,
     }
 }
 
+/* ---- Deactivation helper (called at end of enroll/verify) ---- */
+
 static void
-dev_change_state(FpImageDevice *img_dev, FpiImageDeviceState state)
+deactivate_device (FpDevice *dev)
 {
-  if (state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
-    goodixtls5xx_scan_start(FPI_DEVICE_GOODIXTLS5XX(img_dev));
-}
-static void
-dev_deinit(FpImageDevice *img_dev)
-{
-  FpDevice *dev = FP_DEVICE(img_dev);
   GError *error = NULL;
 
-  if (goodix_dev_deinit(dev, &error))
+  goodix_reset_state (dev);
+
+  goodix_shutdown_tls (dev, &error);
+  if (error)
     {
-      fpi_image_device_close_complete(img_dev, error);
-      return;
+      fp_err ("TLS shutdown error: %s", error->message);
+      g_clear_error (&error);
     }
 
-  fpi_image_device_close_complete(img_dev, NULL);
-}
-static void
-dev_init(FpImageDevice *img_dev)
-{
-  FpDevice *dev = FP_DEVICE(img_dev);
-  GError *error = NULL;
+  FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
 
-  if (goodix_dev_init(dev, &error))
-    {
-      fpi_image_device_open_complete(img_dev, error);
-      return;
-    }
-
-  fpi_image_device_open_complete(img_dev, NULL);
-}
-
-static void
-dev_deactivate(FpImageDevice *img_dev)
-{
-  FpDevice *dev = FP_DEVICE(img_dev);
-
-  goodix_reset_state(dev);
-  GError *error = NULL;
-
-  goodix_shutdown_tls(dev, &error);
-
-  FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS(dev);
-  goodixtls5xx_cleanup(FPI_DEVICE_GOODIXTLS5XX(dev));
+  /* Do NOT call goodixtls5xx_cleanup here — the SSM done callbacks
+   * still need access to enroll_data / last_sigfm_info.  Cleanup is
+   * done in the done callbacks after the results have been consumed. */
 
   if (cls->reset_state)
-    cls->reset_state(dev);
-  fpi_image_device_deactivate_complete(img_dev, error);
+    cls->reset_state (dev);
+}
+
+/* ---- FpDevice open/close ---- */
+
+static void
+dev_open (FpDevice *dev)
+{
+  GError *error = NULL;
+
+  if (!goodix_dev_init (dev, &error))
+    {
+      fpi_device_open_complete (dev, error);
+      return;
+    }
+
+  fpi_device_open_complete (dev, NULL);
 }
 
 static void
-tls_activation_complete(FpDevice *dev, gpointer user_data, GError *error)
+dev_close (FpDevice *dev)
 {
+  GError *error = NULL;
+
+  goodixtls5xx_cleanup (FPI_DEVICE_GOODIXTLS5XX (dev));
+
+  if (!goodix_dev_deinit (dev, &error))
+    {
+      fpi_device_close_complete (dev, error);
+      return;
+    }
+
+  fpi_device_close_complete (dev, NULL);
+}
+
+/* ---- TLS init callback for SSM ---- */
+
+static void
+tls_init_done_cb(FpDevice *dev, gpointer user_data, GError *error)
+{
+  FpiSsm *ssm = user_data;
+
   if (error)
     {
       fp_err("failed to complete tls activation: %s", error->message);
+      fpi_ssm_mark_failed(ssm, error);
       return;
     }
-  FpImageDevice *image_dev = FP_IMAGE_DEVICE(dev);
-
-  fpi_image_device_activate_complete(image_dev, error);
+  fpi_ssm_next_state(ssm);
 }
 
 void
-goodixtls5xx_init_tls(FpDevice *dev)
+goodixtls5xx_init_tls(FpDevice *dev, FpiSsm *ssm)
 {
-  goodix_tls_init(dev, tls_activation_complete, NULL);
+  goodix_tls_init(dev, tls_init_done_cb, ssm);
 }
 
 /* ---- SIGFM vfunc implementations ---- */
@@ -800,10 +821,10 @@ goodix_sigfm_extract_done (GObject      *source_object,
                            gpointer      user_data)
 {
   GTask *task = G_TASK (res);
-  FpImageDevice *self = FP_IMAGE_DEVICE (user_data);
-  FpImage *image = FP_IMAGE (source_object);
+  FpiSsm *ssm = user_data;
+  FpDevice *dev = FP_DEVICE (source_object);
   FpiDeviceGoodixTls5xxPrivate *priv =
-    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (self));
+    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (dev));
   GoodixSigfmExtractData *data = g_task_get_task_data (task);
   GError *error = NULL;
 
@@ -812,9 +833,14 @@ goodix_sigfm_extract_done (GObject      *source_object,
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
         {
           g_warning ("SIGFM extraction failed: %s", error->message);
-          g_clear_pointer (&error, g_error_free);
-          error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
-                                            "SIGFM extraction failed, please retry");
+          g_clear_error (&error);
+          /* Store NULL so the caller knows extraction failed */
+          g_clear_pointer (&priv->last_sigfm_info, sigfm_free_info);
+        }
+      else
+        {
+          fpi_ssm_mark_failed (ssm, error);
+          return;
         }
     }
   else
@@ -823,11 +849,11 @@ goodix_sigfm_extract_done (GObject      *source_object,
       priv->last_sigfm_info = g_steal_pointer (&data->sigfm_info);
     }
 
-  fpi_image_device_extract_complete (self, g_object_ref (image), error);
+  fpi_ssm_next_state (ssm);
 }
 
-void
-goodix_sigfm_extract (FpImageDevice *self, FpImage *image)
+static void
+goodix_sigfm_extract (FpDevice *dev, FpImage *image, FpiSsm *ssm)
 {
   GTask *task;
   GoodixSigfmExtractData *data;
@@ -837,72 +863,83 @@ goodix_sigfm_extract (FpImageDevice *self, FpImage *image)
   data->height = image->height;
   data->image_data = g_memdup2 (image->data, image->width * image->height);
 
-  task = g_task_new (image,
-                     fpi_device_get_cancellable (FP_DEVICE (self)),
+  task = g_task_new (dev,
+                     fpi_device_get_cancellable (dev),
                      goodix_sigfm_extract_done,
-                     self);
+                     ssm);
   g_task_set_task_data (task, data,
                         (GDestroyNotify) goodix_sigfm_extract_data_free);
   g_task_run_in_thread (task, goodix_sigfm_extract_thread);
   g_object_unref (task);
 }
 
-gboolean
-goodix_sigfm_build_print (FpImageDevice  *self,
-                          FpPrint        *print,
-                          FpImage        *image,
-                          GError        **error)
+static gboolean
+goodix_sigfm_build_print (FpDevice    *dev,
+                          FpPrint     *print,
+                          GPtrArray   *descriptors,
+                          GError     **error)
 {
-  FpiDeviceGoodixTls5xxPrivate *priv =
-    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (self));
-
-  if (!priv->last_sigfm_info)
+  if (descriptors->len == 0)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                   "No SIGFM data available");
+                   "No SIGFM descriptors collected");
       return FALSE;
     }
 
-  fpi_print_set_type (print, FPI_PRINT_SIGFM);
+  fpi_print_set_type (print, FPI_PRINT_RAW);
 
-  {
-    int slen;
-    unsigned char *blob = sigfm_serialize_binary (priv->last_sigfm_info, &slen);
-    g_autoptr(GBytes) data = g_bytes_new_take (blob, slen);
+  GVariantBuilder builder;
+  g_variant_builder_init (&builder, G_VARIANT_TYPE ("aay"));
 
-    fpi_print_add_data (print, data);
-  }
+  for (guint i = 0; i < descriptors->len; i++)
+    {
+      GBytes *bytes = g_ptr_array_index (descriptors, i);
+      g_variant_builder_add_value (&builder,
+        g_variant_new_from_bytes (G_VARIANT_TYPE ("ay"), bytes, TRUE));
+    }
+
+  GVariant *data = g_variant_builder_end (&builder);
+  g_object_set (print, "fpi-data", data, NULL);
 
   return TRUE;
 }
 
-FpiMatchResult
-goodix_sigfm_compare (FpImageDevice *self,
-                      FpPrint       *enrolled,
-                      FpPrint       *probe,
-                      GError       **error)
+static FpiMatchResult
+goodix_sigfm_compare (FpDevice   *dev,
+                      FpPrint    *enrolled,
+                      FpPrint    *probe,
+                      GError    **error)
 {
-  GPtrArray *enrolled_prints;
-  GPtrArray *probe_prints;
-  GBytes *probe_bytes;
-  SigfmImgInfo *probe_info;
+  g_autoptr(GVariant) enrolled_data = NULL;
+  g_autoptr(GVariant) probe_data = NULL;
+  GVariantIter probe_iter;
+  g_autoptr(GVariant) probe_entry = NULL;
   gsize probe_len;
   const guchar *probe_blob;
-  guint i;
+  SigfmImgInfo *probe_info;
   FpiMatchResult result = FPI_MATCH_FAIL;
 
-  enrolled_prints = fpi_print_get_data_array (enrolled);
-  probe_prints = fpi_print_get_data_array (probe);
+  g_object_get (enrolled, "fpi-data", &enrolled_data, NULL);
+  g_object_get (probe, "fpi-data", &probe_data, NULL);
 
-  if (probe_prints->len == 0)
+  if (!enrolled_data || !probe_data)
     {
       *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
-                                         "Probe print has no data");
+                                         "Print has no data");
       return FPI_MATCH_ERROR;
     }
 
-  probe_bytes = g_ptr_array_index (probe_prints, 0);
-  probe_blob = g_bytes_get_data (probe_bytes, &probe_len);
+  /* The probe should have at least one descriptor */
+  g_variant_iter_init (&probe_iter, probe_data);
+  probe_entry = g_variant_iter_next_value (&probe_iter);
+  if (!probe_entry)
+    {
+      *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                         "Probe print has no descriptors");
+      return FPI_MATCH_ERROR;
+    }
+
+  probe_blob = g_variant_get_fixed_array (probe_entry, &probe_len, 1);
   probe_info = sigfm_deserialize_binary (probe_blob, probe_len);
   if (!probe_info)
     {
@@ -911,46 +948,401 @@ goodix_sigfm_compare (FpImageDevice *self,
       return FPI_MATCH_ERROR;
     }
 
-  for (i = 0; i < enrolled_prints->len; i++)
-    {
-      GBytes *entry = g_ptr_array_index (enrolled_prints, i);
-      gsize elen;
-      const guchar *eblob = g_bytes_get_data (entry, &elen);
-      SigfmImgInfo *einfo = sigfm_deserialize_binary (eblob, elen);
-      gint score;
+  /* Check against all enrolled descriptors */
+  {
+    GVariantIter enrolled_iter;
+    GVariant *entry;
 
-      if (!einfo)
-        {
-          sigfm_free_info (probe_info);
-          *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
-                                             "Failed to deserialize enrolled");
-          return FPI_MATCH_ERROR;
-        }
+    g_variant_iter_init (&enrolled_iter, enrolled_data);
+    while ((entry = g_variant_iter_next_value (&enrolled_iter)) != NULL)
+      {
+        gsize elen;
+        const guchar *eblob = g_variant_get_fixed_array (entry, &elen, 1);
+        SigfmImgInfo *einfo = sigfm_deserialize_binary (eblob, elen);
+        gint score;
 
-      score = sigfm_match_score (einfo, probe_info);
-      sigfm_free_info (einfo);
+        if (!einfo)
+          {
+            sigfm_free_info (probe_info);
+            g_variant_unref (entry);
+            *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                               "Failed to deserialize enrolled");
+            return FPI_MATCH_ERROR;
+          }
 
-      if (score < 0)
-        {
-          sigfm_free_info (probe_info);
-          *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
-                                             "Error in sigfm_match_score");
-          return FPI_MATCH_ERROR;
-        }
+        score = sigfm_match_score (einfo, probe_info);
+        sigfm_free_info (einfo);
 
-      fp_dbg ("sigfm score %d/%d", score, GOODIX_SIGFM_THRESHOLD);
-      if (score >= GOODIX_SIGFM_THRESHOLD)
-        {
-          result = FPI_MATCH_SUCCESS;
-          break;
-        }
-    }
+        if (score < 0)
+          {
+            sigfm_free_info (probe_info);
+            g_variant_unref (entry);
+            *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                                               "Error in sigfm_match_score");
+            return FPI_MATCH_ERROR;
+          }
+
+        fp_dbg ("sigfm score %d/%d", score, GOODIX_SIGFM_THRESHOLD);
+        if (score >= GOODIX_SIGFM_THRESHOLD)
+          {
+            result = FPI_MATCH_SUCCESS;
+            g_variant_unref (entry);
+            break;
+          }
+        g_variant_unref (entry);
+      }
+  }
 
   sigfm_free_info (probe_info);
   return result;
 }
 
-/* ---- End SIGFM vfunc implementations ---- */
+/* ---- Enroll state machine ---- */
+
+enum enroll_states
+{
+  ENROLL_ACTIVATE,
+  ENROLL_TLS_INIT,
+  ENROLL_SCAN,
+  ENROLL_EXTRACT,
+  ENROLL_COLLECT,
+  ENROLL_DEACTIVATE,
+
+  ENROLL_NUM_STATES,
+};
+
+static void
+enroll_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX (dev);
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (self);
+  FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case ENROLL_ACTIVATE:
+      cls->activate (dev, ssm);
+      break;
+
+    case ENROLL_TLS_INIT:
+      goodixtls5xx_init_tls (dev, ssm);
+      break;
+
+    case ENROLL_SCAN:
+      fpi_device_report_finger_status_changes (dev,
+                                               FP_FINGER_STATUS_NEEDED,
+                                               FP_FINGER_STATUS_NONE);
+      g_clear_object (&priv->last_image);
+      fpi_ssm_start_subsm (ssm,
+                           fpi_ssm_new (dev, scan_run_state, SCAN_STAGE_NUM));
+      break;
+
+    case ENROLL_EXTRACT:
+      if (!priv->last_image)
+        {
+          /* Low quality scan — report retry and loop back */
+          fpi_device_enroll_progress (dev, priv->enroll_stage, NULL,
+            fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+          fpi_ssm_jump_to_state (ssm, ENROLL_SCAN);
+          break;
+        }
+      goodix_sigfm_extract (dev, priv->last_image, ssm);
+      break;
+
+    case ENROLL_COLLECT:
+      {
+        if (!priv->last_sigfm_info)
+          {
+            /* SIGFM extraction failed — report retry and rescan */
+            fpi_device_enroll_progress (dev, priv->enroll_stage, NULL,
+              fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+            fpi_ssm_jump_to_state (ssm, ENROLL_SCAN);
+            break;
+          }
+
+        /* Serialize and store the SIGFM descriptor */
+        int slen;
+        unsigned char *blob = sigfm_serialize_binary (priv->last_sigfm_info,
+                                                      &slen);
+        GBytes *bytes = g_bytes_new_take (blob, slen);
+        g_ptr_array_add (priv->enroll_data, bytes);
+        priv->enroll_stage++;
+
+        fp_dbg ("enroll stage %d/%d completed",
+                priv->enroll_stage, fp_device_get_nr_enroll_stages (dev));
+
+        FpPrint *print = NULL;
+        fpi_device_get_enroll_data (dev, &print);
+        fpi_device_enroll_progress (dev, priv->enroll_stage, print, NULL);
+
+        if (priv->enroll_stage < fp_device_get_nr_enroll_stages (dev))
+          {
+            /* Mark the final iteration so the scan SSM can fire-and-forget
+             * the FDT_UP command instead of waiting for a response that
+             * will never arrive (the device is reset during deactivation
+             * before it can reply). */
+            if (priv->enroll_stage == fp_device_get_nr_enroll_stages (dev) - 1)
+              priv->last_scan = TRUE;
+            fpi_ssm_jump_to_state (ssm, ENROLL_SCAN);
+          }
+        else
+          {
+            fpi_ssm_next_state (ssm);
+          }
+        break;
+      }
+
+    case ENROLL_DEACTIVATE:
+      deactivate_device (dev);
+      fpi_ssm_next_state (ssm);
+      break;
+
+    }
+}
+
+static void
+enroll_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX (dev);
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (self);
+
+  if (error)
+    {
+      deactivate_device (dev);
+      fpi_device_enroll_complete (dev, NULL, error);
+      g_clear_pointer (&priv->enroll_data, g_ptr_array_unref);
+      goodixtls5xx_cleanup (self);
+      priv->task_ssm = NULL;
+      return;
+    }
+
+  /* Build the final print from collected descriptors */
+  FpPrint *print = NULL;
+  fpi_device_get_enroll_data (dev, &print);
+
+  GError *build_err = NULL;
+  if (!goodix_sigfm_build_print (dev, print, priv->enroll_data, &build_err))
+    {
+      fpi_device_enroll_complete (dev, NULL, build_err);
+    }
+  else
+    {
+      fp_info ("Enrollment complete with %d descriptors",
+               priv->enroll_data->len);
+      fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
+    }
+
+  g_clear_pointer (&priv->enroll_data, g_ptr_array_unref);
+  goodixtls5xx_cleanup (self);
+  priv->task_ssm = NULL;
+}
+
+static void
+dev_enroll (FpDevice *dev)
+{
+  FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX (dev);
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (self);
+
+  priv->enroll_stage = 0;
+  priv->last_scan = FALSE;
+  priv->enroll_data =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+
+  priv->task_ssm = fpi_ssm_new (dev, enroll_run_state,
+                                ENROLL_NUM_STATES);
+  fpi_ssm_start (priv->task_ssm, enroll_ssm_done);
+}
+
+/* ---- Verify / Identify state machine ---- */
+
+enum verify_states
+{
+  VERIFY_ACTIVATE,
+  VERIFY_TLS_INIT,
+  VERIFY_SCAN,
+  VERIFY_EXTRACT,
+  VERIFY_COMPARE,
+  VERIFY_DEACTIVATE,
+
+  VERIFY_NUM_STATES,
+};
+
+static void
+verify_run_state (FpiSsm *ssm, FpDevice *dev)
+{
+  FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX (dev);
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (self);
+  FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case VERIFY_ACTIVATE:
+      cls->activate (dev, ssm);
+      break;
+
+    case VERIFY_TLS_INIT:
+      goodixtls5xx_init_tls (dev, ssm);
+      break;
+
+    case VERIFY_SCAN:
+      fpi_device_report_finger_status_changes (dev,
+                                               FP_FINGER_STATUS_NEEDED,
+                                               FP_FINGER_STATUS_NONE);
+      g_clear_object (&priv->last_image);
+      fpi_ssm_start_subsm (ssm,
+                           fpi_ssm_new (dev, scan_run_state, SCAN_STAGE_NUM));
+      break;
+
+    case VERIFY_EXTRACT:
+      if (!priv->last_image)
+        {
+          /* Low quality scan — retry */
+          if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+            fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL,
+              fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+          else
+            fpi_device_identify_report (dev, NULL, NULL,
+              fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+          fpi_ssm_jump_to_state (ssm, VERIFY_SCAN);
+          break;
+        }
+      goodix_sigfm_extract (dev, priv->last_image, ssm);
+      break;
+
+    case VERIFY_COMPARE:
+      {
+        if (!priv->last_sigfm_info)
+          {
+            /* SIGFM extraction failed — retry */
+            if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+              fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL,
+                fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+            else
+              fpi_device_identify_report (dev, NULL, NULL,
+                fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+            fpi_ssm_jump_to_state (ssm, VERIFY_SCAN);
+            break;
+          }
+
+        /* Build a temporary probe print from the single scan */
+        g_autoptr(FpPrint) probe_print = fp_print_new (dev);
+        {
+          int slen;
+          unsigned char *blob =
+            sigfm_serialize_binary (priv->last_sigfm_info, &slen);
+          g_autoptr(GBytes) bytes = g_bytes_new_take (blob, slen);
+          g_autoptr(GPtrArray) probe_data =
+            g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+          g_ptr_array_add (probe_data, g_bytes_ref (bytes));
+
+          GError *build_err = NULL;
+          if (!goodix_sigfm_build_print (dev, probe_print, probe_data,
+                                         &build_err))
+            {
+              fpi_ssm_mark_failed (ssm, build_err);
+              break;
+            }
+        }
+
+        GError *cmp_err = NULL;
+
+        if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+          {
+            FpPrint *enrolled = NULL;
+            fpi_device_get_verify_data (dev, &enrolled);
+
+            FpiMatchResult match = goodix_sigfm_compare (dev, enrolled,
+                                                         probe_print,
+                                                         &cmp_err);
+            fpi_device_verify_report (dev, match,
+                                     g_steal_pointer (&probe_print), cmp_err);
+          }
+        else
+          {
+            /* Identify: check against all enrolled prints */
+            GPtrArray *gallery = NULL;
+            FpPrint *matching = NULL;
+            fpi_device_get_identify_data (dev, &gallery);
+
+            for (guint i = 0; i < gallery->len; i++)
+              {
+                FpPrint *enrolled = g_ptr_array_index (gallery, i);
+                FpiMatchResult match = goodix_sigfm_compare (dev, enrolled,
+                                                             probe_print,
+                                                             &cmp_err);
+                if (cmp_err)
+                  break;
+                if (match == FPI_MATCH_SUCCESS)
+                  {
+                    matching = enrolled;
+                    break;
+                  }
+              }
+
+            fpi_device_identify_report (dev, matching,
+                                       g_steal_pointer (&probe_print), cmp_err);
+          }
+
+        fpi_ssm_next_state (ssm);
+        break;
+      }
+
+    case VERIFY_DEACTIVATE:
+      deactivate_device (dev);
+      fpi_ssm_next_state (ssm);
+      break;
+
+    }
+}
+
+static void
+verify_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX (dev);
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (self);
+
+  if (error)
+    deactivate_device (dev);
+
+  if (error && error->domain == FP_DEVICE_RETRY)
+    {
+      if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+        fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL,
+                                  g_steal_pointer (&error));
+      else
+        fpi_device_identify_report (dev, NULL, NULL,
+                                    g_steal_pointer (&error));
+    }
+
+  if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
+    fpi_device_verify_complete (dev, error);
+  else
+    fpi_device_identify_complete (dev, error);
+
+  goodixtls5xx_cleanup (self);
+  priv->task_ssm = NULL;
+}
+
+static void
+dev_verify_identify (FpDevice *dev)
+{
+  FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX (dev);
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (self);
+
+  priv->last_scan = FALSE;
+
+  priv->task_ssm = fpi_ssm_new (dev, verify_run_state,
+                                VERIFY_NUM_STATES);
+  fpi_ssm_start (priv->task_ssm, verify_ssm_done);
+}
+
+/* ---- GObject class init ---- */
 
 void
 fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
@@ -960,13 +1352,15 @@ fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
   self->scan_height = 0;
   self->scan_width = 0;
   self->reset_state = NULL;
+  self->activate = NULL;
 
-  FpImageDeviceClass *img_cls = FP_IMAGE_DEVICE_CLASS(self);
+  FpDeviceClass *dev_cls = FP_DEVICE_CLASS(self);
 
-  img_cls->change_state = dev_change_state;
-  img_cls->deactivate = dev_deactivate;
-  img_cls->img_close = dev_deinit;
-  img_cls->img_open = dev_init;
+  dev_cls->open     = dev_open;
+  dev_cls->close    = dev_close;
+  dev_cls->enroll   = dev_enroll;
+  dev_cls->verify   = dev_verify_identify;
+  dev_cls->identify = dev_verify_identify;
 }
 
 void
@@ -975,6 +1369,10 @@ fpi_device_goodixtls5xx_init(FpiDeviceGoodixTls5xx *self)
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(self);
   priv->calibration_img = NULL;
   priv->last_sigfm_info = NULL;
+  priv->last_image = NULL;
+  priv->enroll_stage = 0;
+  priv->enroll_data = NULL;
+  priv->task_ssm = NULL;
 }
 
 void
@@ -984,4 +1382,6 @@ goodixtls5xx_cleanup(FpiDeviceGoodixTls5xx *dev)
   g_free(priv->calibration_img);
   priv->calibration_img = NULL;
   g_clear_pointer(&priv->last_sigfm_info, sigfm_free_info);
+  g_clear_object(&priv->last_image);
+  g_clear_pointer(&priv->enroll_data, g_ptr_array_unref);
 }

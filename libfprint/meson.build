@@ -160,6 +160,7 @@ driver_sources = {
             'drivers/goodixtls/goodixtls.c',
             'drivers/goodixtls/goodix5xx.c',
             'drivers/goodixtls/goodix511.c',
+            'drivers/goodixtls/sigfm.c',
         ],
 }
 
@@ -250,7 +251,6 @@ deps = [
 # in the build tree. This silences a build time warning.
 subdir('nbis/include')
 subdir('nbis/libfprint-include')
-subdir('sigfm')
 deps += declare_dependency(include_directories: [
     root_inc,
     include_directories('nbis/include'),
@@ -275,7 +275,7 @@ libfprint_private = static_library('fprint-private',
         libfprint_private_sources,
     ],
     dependencies: deps,
-    link_with: [libnbis, libsigfm],
+    link_with: [libnbis],
     install: false)
 
 libfprint_drivers = static_library('fprint-drivers',

@@ -19,9 +19,8 @@
 
 #pragma once
 
-#include "fp-image-device.h"
 #include "fpi-device.h"
-#include "fpi-print.h"
+#include "fp-image-device.h"
 
 /**
  * FpiImageDeviceState:
@@ -85,17 +84,6 @@ typedef enum {
  * @change_state: Notification about the current device state (i.e. waiting for
  *   finger or image capture). Implementing this is optional, it can e.g. be
  *   used to flash an LED when waiting for a finger.
- * @extract: (nullable): Optional custom feature extraction. When set, the
- *   driver receives the captured #FpImage and must call
- *   fpi_image_device_extract_complete() when finished. If %NULL, the default
- *   NBIS minutiae extraction is used.
- * @build_print: (nullable): Optional custom print builder. When set, the
- *   driver populates @print from extracted features instead of the default
- *   NBIS minutiae path. Returns %TRUE on success, %FALSE on error (with
- *   @error set).
- * @compare: (nullable): Optional custom matcher. When set, the driver
- *   compares @enrolled against @probe and returns a #FpiMatchResult.
- *   If %NULL, the default bz3 matcher is used.
  *
  * These are the main entry points for drivers to implement. Drivers may not
  * implement all of these entry points if they do not support the operation
@@ -114,31 +102,18 @@ typedef enum {
  */
 struct _FpImageDeviceClass
 {
-  FpDeviceClass           parent_class;
+  FpDeviceClass parent_class;
 
-  gint                    bz3_threshold;
-  gint                    img_width;
-  gint                    img_height;
+  gint          bz3_threshold;
+  gint          img_width;
+  gint          img_height;
 
-  void                    (*img_open)     (FpImageDevice *dev);
-  void                    (*img_close)    (FpImageDevice *dev);
-  void                    (*activate)     (FpImageDevice *dev);
-  void                    (*change_state) (FpImageDevice      *dev,
-                                           FpiImageDeviceState state);
-  void                    (*deactivate)   (FpImageDevice *dev);
-
-  /*< private >*/
-  /* Optional vfuncs for custom feature extraction and matching. */
-  void                    (*extract)      (FpImageDevice  *dev,
-                                           FpImage        *image);
-  gboolean                (*build_print)  (FpImageDevice  *dev,
-                                           FpPrint        *print,
-                                           FpImage        *image,
-                                           GError        **error);
-  FpiMatchResult          (*compare)      (FpImageDevice  *dev,
-                                           FpPrint        *enrolled,
-                                           FpPrint        *probe,
-                                           GError        **error);
+  void          (*img_open)     (FpImageDevice *dev);
+  void          (*img_close)    (FpImageDevice *dev);
+  void          (*activate)     (FpImageDevice *dev);
+  void          (*change_state) (FpImageDevice      *dev,
+                                 FpiImageDeviceState state);
+  void          (*deactivate)   (FpImageDevice *dev);
 };
 
 void fpi_image_device_set_bz3_threshold (FpImageDevice *self,
@@ -160,8 +135,5 @@ void fpi_image_device_report_finger_status (FpImageDevice *self,
                                             gboolean       present);
 void fpi_image_device_image_captured (FpImageDevice *self,
                                       FpImage       *image);
-void fpi_image_device_extract_complete (FpImageDevice *self,
-                                        FpImage       *image,
-                                        GError        *error);
 void fpi_image_device_retry_scan (FpImageDevice *self,
                                   FpDeviceRetry  retry);

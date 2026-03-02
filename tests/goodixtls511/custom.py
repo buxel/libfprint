@@ -22,8 +22,7 @@ del devices
 # -- Driver identity checks --------------------------------------------------
 assert d.get_driver() == "goodixtls511"
 
-# FpImageDevice provides CAPTURE, VERIFY, IDENTIFY; temp_hot_seconds=-1 → ALWAYS_ON
-assert d.has_feature(FPrint.DeviceFeature.CAPTURE)
+# FpDevice with enroll/verify/identify vfuncs; temp_hot_seconds=-1 → ALWAYS_ON
 assert d.has_feature(FPrint.DeviceFeature.VERIFY)
 assert d.has_feature(FPrint.DeviceFeature.IDENTIFY)
 assert d.has_feature(FPrint.DeviceFeature.ALWAYS_ON)
@@ -68,5 +67,7 @@ assert verify_res == True
 
 # -- Close device --------------------------------------------------------------
 d.close_sync()
+del d
+del c
 
 print("Test passed")

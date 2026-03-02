@@ -22,9 +22,7 @@
 
 #include "drivers/goodixtls/goodix5xx.h"
 #include "fp-device.h"
-#include "fp-image-device.h"
 #include "fp-image.h"
-#include "fpi-image-device.h"
 #include "fpi-image.h"
 #include "fpi-ssm.h"
 
@@ -201,32 +199,16 @@ activate_run_state(FpiSsm *ssm, FpDevice *dev)
     }
 }
 
-static void
-activate_complete(FpiSsm *ssm, FpDevice *dev, GError *error)
-{
-  G_DEBUG_HERE();
-  if (!error)
-    {
-      goodixtls5xx_init_tls(dev);
-    }
-  else
-    {
-      fp_err("failed during activation: %s (code: %d)", error->message, error->code);
-      fpi_image_device_activate_complete(FP_IMAGE_DEVICE(dev), error);
-    }
-}
-
 const guint8 fdt_switch_state_mode[] = {
   0x01, 0x80, 0xaf, 0x80, 0xbf, 0x80, 0xa4, 0x80, 0xb8, 0x80, 0xa8, 0x80, 0xb7,
 };
 
 static void
-dev_activate(FpImageDevice *img_dev)
+goodix511_activate (FpDevice *dev, FpiSsm *parent_ssm)
 {
-  FpDevice *dev = FP_DEVICE(img_dev);
-
-  fpi_ssm_start(fpi_ssm_new(dev, activate_run_state, ACTIVATE_NUM_STATES),
-                activate_complete);
+  fpi_ssm_start_subsm (parent_ssm,
+                       fpi_ssm_new (dev, activate_run_state,
+                                    ACTIVATE_NUM_STATES));
 }
 
 static void
@@ -266,7 +248,6 @@ fpi_device_goodixtls511_class_init(FpiDeviceGoodixTls511Class *class)
 {
   FpiDeviceGoodixTlsClass *gx_class = FPI_DEVICE_GOODIXTLS_CLASS(class);
   FpDeviceClass *dev_class = FP_DEVICE_CLASS(class);
-  FpImageDeviceClass *img_dev_class = FP_IMAGE_DEVICE_CLASS(class);
   FpiDeviceGoodixTls5xxClass *xx_cls = FPI_DEVICE_GOODIXTLS5XX_CLASS(class);
 
   xx_cls->get_mcu_cfg = get_mcu_config;
@@ -275,6 +256,7 @@ fpi_device_goodixtls511_class_init(FpiDeviceGoodixTls511Class *class)
   xx_cls->scan_width = GOODIX511_SCAN_WIDTH;
   xx_cls->firmware_version = GOODIX_511_FIRMWARE_VERSION;
   xx_cls->reset_number = GOODIX_511_RESET_NUMBER;
+  xx_cls->activate = goodix511_activate;
 
   gx_class->interface = GOODIX_511_INTERFACE;
   gx_class->ep_in = GOODIX_511_EP_IN;
@@ -288,15 +270,6 @@ fpi_device_goodixtls511_class_init(FpiDeviceGoodixTls511Class *class)
 
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->temp_hot_seconds = -1; /* sensor has no overcurrent risk */
-
-  img_dev_class->img_width = GOODIX511_WIDTH;
-  img_dev_class->img_height = GOODIX511_HEIGHT;
-
-  img_dev_class->activate = dev_activate;
-
-  img_dev_class->extract = goodix_sigfm_extract;
-  img_dev_class->build_print = goodix_sigfm_build_print;
-  img_dev_class->compare = goodix_sigfm_compare;
 
   fpi_device_class_auto_initialize_features(dev_class);
 }

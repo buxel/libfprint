@@ -11,13 +11,11 @@ G_BEGIN_DECLS
  * @FPI_PRINT_UNDEFINED: Undefined type, this happens prior to enrollment
  * @FPI_PRINT_RAW: A raw print where the data is directly compared
  * @FPI_PRINT_NBIS: NBIS minutiae comparison
- * @FPI_PRINT_SIGFM: SIGFM minutiae comparison
  */
 typedef enum {
   FPI_PRINT_UNDEFINED = 0,
   FPI_PRINT_RAW,
   FPI_PRINT_NBIS,
-  FPI_PRINT_SIGFM,
 } FpiPrintType;
 
 /**
@@ -48,11 +46,6 @@ FpiMatchResult fpi_print_bz3_match (FpPrint *temp,
                                     FpPrint *print,
                                     gint     bz3_threshold,
                                     GError **error);
-
-void fpi_print_add_data (FpPrint *print,
-                        GBytes  *data);
-
-GPtrArray *fpi_print_get_data_array (FpPrint *print);
 
 /* Helpers to encode metadata into user ID strings. */
 gchar *  fpi_print_generate_user_id (FpPrint *print);

@@ -58,7 +58,7 @@ typedef struct
 } FpiDeviceGoodixTlsPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(FpiDeviceGoodixTls, fpi_device_goodixtls,
-                                    FP_TYPE_IMAGE_DEVICE);
+                                    FP_TYPE_DEVICE);
 
 gchar *
 data_to_str(guint8 *data, guint32 length)
@@ -401,9 +401,10 @@ goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_da
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
   FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
 
-  if (g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
+  if (!priv->inited || g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
     {
-      fp_dbg("transfer cancelled, aborting read loop...");
+      fp_dbg("read loop stopped, discarding transfer");
+      g_clear_error(&error);
       return;
     }
   if (error)
@@ -419,7 +420,13 @@ goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_da
 
   goodix_receive_pack(dev, transfer->buffer, transfer->actual_length);
 
-  goodix_receive_data(dev);
+  /* A zero-length bulk read means no data was available.  On real
+   * hardware this cannot happen (reads block until data arrives), but
+   * under umockdev pcap replay it signals the pcap is exhausted.
+   * Do not resubmit — the next goodix_start_read_loop call will
+   * restart the loop if a subsequent operation needs it. */
+  if (transfer->actual_length > 0)
+    goodix_receive_data(dev);
 }
 
 void
@@ -1120,6 +1127,8 @@ goodix_dev_deinit(FpDevice *dev, GError **error)
   if (priv->timeout)
     g_source_destroy(priv->timeout);
   g_free(priv->data);
+
+  priv->inited = FALSE;
   g_cancellable_cancel(priv->transfer_cancel_tkn);
 
   GError *tls_error = NULL;
@@ -1131,7 +1140,6 @@ goodix_dev_deinit(FpDevice *dev, GError **error)
     }
 
   goodix_reset_state(dev);
-  priv->inited = FALSE;
 
   return g_usb_device_release_interface(fpi_device_get_usb_device(dev), class->interface,
                                         0, error);

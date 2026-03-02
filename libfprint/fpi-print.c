@@ -22,9 +22,8 @@
 #include "fpi-log.h"
 
 #include "fp-print-private.h"
-#include "fpi-compat.h"
 #include "fpi-device.h"
-#include "fpi-print.h"
+#include "fpi-compat.h"
 
 /**
  * SECTION: fpi-print
@@ -40,30 +39,18 @@
  * @print: A #FpPrint
  * @add: Print to append to @print
  *
- * Appends the single #FPI_PRINT_NBIS or #FPI_PRINT_SIGFM print from @add
- * to the collection of prints in @print. Both print objects need to be of
- * the same type for this to work.
+ * Appends the single #FPI_PRINT_NBIS print from @add to the collection of
+ * prints in @print. Both print objects need to be of type #FPI_PRINT_NBIS
+ * for this to work.
  */
 void
 fpi_print_add_print (FpPrint *print, FpPrint *add)
 {
-  gpointer to_add;
-
-  g_return_if_fail (print->type == FPI_PRINT_NBIS ||
-                    print->type == FPI_PRINT_SIGFM);
-  g_return_if_fail (add->type == FPI_PRINT_NBIS ||
-                    add->type == FPI_PRINT_SIGFM);
-  g_return_if_fail (add->type == print->type);
-  g_return_if_fail (add->prints->len > 0);
+  g_return_if_fail (print->type == FPI_PRINT_NBIS);
+  g_return_if_fail (add->type == FPI_PRINT_NBIS);
 
   g_assert (add->prints->len == 1);
-
-  if (print->type == FPI_PRINT_NBIS)
-    to_add = g_memdup2 (add->prints->pdata[0], sizeof (struct xyt_struct));
-  else
-    to_add = g_bytes_ref (add->prints->pdata[0]);
-
-  g_ptr_array_add (print->prints, to_add);
+  g_ptr_array_add (print->prints, g_memdup2 (add->prints->pdata[0], sizeof (struct xyt_struct)));
 }
 
 /**
@@ -84,14 +71,10 @@ fpi_print_set_type (FpPrint     *print,
   g_return_if_fail (print->type == FPI_PRINT_UNDEFINED);
 
   print->type = type;
-  if (print->type == FPI_PRINT_NBIS || print->type == FPI_PRINT_SIGFM)
+  if (print->type == FPI_PRINT_NBIS)
     {
       g_assert_null (print->prints);
-      if (print->type == FPI_PRINT_NBIS)
-        print->prints = g_ptr_array_new_with_free_func (g_free);
-      else
-        print->prints = g_ptr_array_new_with_free_func (
-          (GDestroyNotify) g_bytes_unref);
+      print->prints = g_ptr_array_new_with_free_func (g_free);
     }
   g_object_notify (G_OBJECT (print), "fpi-type");
 }
@@ -189,7 +172,9 @@ fpi_print_add_from_image (FpPrint *print,
   minutiae = fp_image_get_minutiae (image);
   if (!minutiae || minutiae->len == 0)
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
                    "No minutiae found in image or not yet detected!");
       return FALSE;
     }
@@ -207,42 +192,6 @@ fpi_print_add_from_image (FpPrint *print,
   g_object_notify (G_OBJECT (print), "image");
 
   return TRUE;
-}
-
-/**
- * fpi_print_add_data:
- * @print: A #FpPrint of type %FPI_PRINT_SIGFM
- * @data: (transfer none) (not nullable): Opaque serialized print data
- *
- * Adds a reference to @data to the internal array of @print.
- * The print must already have its type set to %FPI_PRINT_SIGFM.
- */
-void
-fpi_print_add_data (FpPrint *print,
-                    GBytes  *data)
-{
-  g_return_if_fail (print->type == FPI_PRINT_SIGFM);
-  g_return_if_fail (data != NULL);
-
-  g_ptr_array_add (print->prints, g_bytes_ref (data));
-}
-
-/**
- * fpi_print_get_data_array:
- * @print: A #FpPrint of type %FPI_PRINT_SIGFM
- *
- * Returns the internal array of opaque data blobs (each element is a
- * #GBytes) for a print that uses opaque data storage.
- *
- * Returns: (transfer none) (element-type GBytes) (nullable): The array
- *   of data entries, or %NULL if @print is not of type %FPI_PRINT_SIGFM
- */
-GPtrArray *
-fpi_print_get_data_array (FpPrint *print)
-{
-  g_return_val_if_fail (print->type == FPI_PRINT_SIGFM, NULL);
-
-  return print->prints;
 }
 
 /**

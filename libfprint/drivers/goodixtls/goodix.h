@@ -26,13 +26,13 @@
 #define GOODIX_TIMEOUT (1000)
 
 G_DECLARE_DERIVABLE_TYPE(FpiDeviceGoodixTls, fpi_device_goodixtls, FPI, DEVICE_GOODIXTLS,
-                         FpImageDevice)
+                         FpDevice)
 
 #define FPI_TYPE_DEVICE_GOODIXTLS (fpi_device_goodixtls_get_type())
 
 struct _FpiDeviceGoodixTlsClass
 {
-  FpImageDeviceClass parent;
+  FpDeviceClass parent;
 
   gint interface;
   guint8 ep_in;
@@ -143,6 +143,10 @@ goodix_receive_data(FpDevice *dev);
  */
 void
 goodix_start_read_loop(FpDevice *dev);
+
+/**
+ * Stop the USB read loop.
+ *
 // ---- GOODIX RECEIVE SECTION END ----
 
 // -----------------------------------------------------------------------------
