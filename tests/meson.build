@@ -59,6 +59,7 @@ drivers_tests = [
 	'realtek',
 	'realtek-5816',
     'focaltech_moc',
+    'goodixtls511',
 ]
 
 if get_option('introspection')
@@ -165,15 +166,36 @@ if get_option('introspection')
         endif
     endforeach
 
+    # Deterministic RNG shim for pcap-replay driver tests.
+    # Under FP_DEVICE_EMULATION=1 + LD_PRELOAD this replaces gnutls_rnd()
+    # with a simple counter so that TLS handshake bytes are byte-identical
+    # across record and replay runs.  When FP_DEVICE_EMULATION is unset
+    # the shim passes through to the real implementation.
+    getrandom_seed = shared_library('getrandom-seed',
+        'getrandom-seed.c',
+        dependencies: [cc.find_library('dl', required: false)],
+    )
+
     driver_tests_enabled = false
     foreach driver_test: drivers_tests
         driver_name = driver_test.split('-')[0]
         driver_envs = envs
         driver_envs.set('FP_DRIVERS_ALLOWLIST', driver_name)
 
+        # The getrandom-seed shim is only needed by drivers that use TLS
+        # (currently only goodixtls511).  Keep LD_PRELOAD scoped so other
+        # driver tests are not affected.
+        if driver_name == 'goodixtls511'
+            driver_envs.prepend('LD_PRELOAD', getrandom_seed.full_path())
+        endif
+
         if (driver_name in supported_drivers and
             gusb_dep.version().version_compare('>= 0.3.0'))
             driver_tests_enabled = true
+            driver_test_deps = [libfprint_typelib]
+            if driver_name == 'goodixtls511'
+                driver_test_deps += [getrandom_seed]
+            endif
             test(driver_test,
                 python3,
                 args: [
@@ -183,7 +205,7 @@ if get_option('introspection')
                 env: driver_envs,
                 suite: ['drivers'],
                 timeout: 15,
-                depends: libfprint_typelib,
+                depends: driver_test_deps,
             )
 
             if installed_tests
