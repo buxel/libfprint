@@ -55,6 +55,12 @@ typedef struct
 
   GCancellable *transfer_cancel_tkn;
   gboolean inited;
+
+  /* Consecutive bulk-transfer failures in the read loop. Used to break
+   * out of the resubmit cycle when the device is gone instead of
+   * spinning at 100% CPU (see goodix_receive_data_cb). Reset on every
+   * successful transfer and when the loop is (re)started. */
+  guint consecutive_errors;
 } FpiDeviceGoodixTlsPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(FpiDeviceGoodixTls, fpi_device_goodixtls,
@@ -394,6 +400,12 @@ goodix_receive_pack(FpDevice *dev, guint8 *data, guint32 length)
   priv->length = 0;
 }
 
+/* Give up the read loop after this many consecutive transfer failures
+ * and fail the pending command instead of resubmitting forever. A gone
+ * device fails every resubmitted transfer immediately, which used to
+ * spin one CPU core at 100% and pin fprintd on the D-Bus name. */
+#define GOODIX_MAX_CONSECUTIVE_ERRORS 5
+
 void
 goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_data,
                        GError *error)
@@ -409,14 +421,48 @@ goodix_receive_data_cb(FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_da
     }
   if (error)
     {
-      // Warn about error and free it.
-      fp_warn("Receive data error: %s", error->message);
+      gboolean fatal;
+
+      priv->consecutive_errors++;
+      fatal = (priv->consecutive_errors >= GOODIX_MAX_CONSECUTIVE_ERRORS)
+              || g_error_matches(error, G_USB_DEVICE_ERROR,
+                                 G_USB_DEVICE_ERROR_NO_DEVICE);
+
+      /* Warn once, debug after that: a dead device used to spam the
+       * journal with hundreds of identical warnings per second. */
+      if (priv->consecutive_errors == 1)
+        fp_warn("Receive data error: %s", error->message);
+      else
+        fp_dbg("Receive data error (%u in a row): %s",
+               priv->consecutive_errors, error->message);
+
+      if (fatal)
+        {
+          /* Stop the loop so the next activate run starts it over
+           * cleanly via goodix_start_read_loop(). */
+          priv->inited = FALSE;
+          priv->consecutive_errors = 0;
+
+          if (priv->ack || priv->reply)
+            {
+              /* Fail the pending command (goodix_receive_done takes
+               * ownership of the error) so the SSM terminates and
+               * fprintd can go idle instead of hanging. */
+              goodix_receive_done(dev, NULL, 0, error);
+            }
+          else
+            {
+              g_error_free(error);
+            }
+          return;
+        }
       g_error_free(error);
 
       // Retry receiving data and return.
       goodix_receive_data(dev);
       return;
     }
+  priv->consecutive_errors = 0;
 
   goodix_receive_pack(dev, transfer->buffer, transfer->actual_length);
 
@@ -452,6 +498,7 @@ goodix_start_read_loop(FpDevice *dev)
     return;
   else
     priv->inited = TRUE;
+  priv->consecutive_errors = 0;
   if (g_cancellable_is_cancelled(priv->transfer_cancel_tkn))
     g_cancellable_reset(priv->transfer_cancel_tkn);
 
@@ -1099,6 +1146,7 @@ goodix_dev_init(FpDevice *dev, GError **error)
   priv->data = NULL;
   priv->length = 0;
   priv->transfer_cancel_tkn = g_cancellable_new();
+  priv->consecutive_errors = 0;
 
   return g_usb_device_claim_interface(fpi_device_get_usb_device(dev), class->interface, 0,
                                       error);
