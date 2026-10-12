@@ -144,9 +144,6 @@ goodix_receive_data(FpDevice *dev);
 void
 goodix_start_read_loop(FpDevice *dev);
 
-/**
- * Stop the USB read loop.
- *
 // ---- GOODIX RECEIVE SECTION END ----
 
 // -----------------------------------------------------------------------------

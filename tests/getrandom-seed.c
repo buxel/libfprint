@@ -18,7 +18,9 @@
  * the real implementations.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
@@ -42,6 +44,12 @@ init (void)
   const char *env = getenv ("FP_DEVICE_EMULATION");
   emulation = (env && strcmp (env, "1") == 0) ? 1 : 0;
 }
+
+/* Interposed GnuTLS entry points. Signatures match gnutls/gnutls.h;
+ * the header itself is deliberately not included to keep the shim
+ * decoupled from the GnuTLS version. */
+int gnutls_rnd (int level, void *data, size_t len);
+int gnutls_init (void *session, unsigned int flags);
 
 /* Override gnutls_rnd() — the single entry point GnuTLS uses for all
  * random byte generation.  This intercepts regardless of the underlying
