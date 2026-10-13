@@ -1327,6 +1327,12 @@ dev_verify_identify (FpDevice *dev)
   fpi_ssm_start (priv->task_ssm, verify_ssm_done);
 }
 
+static void
+dev_cancel (FpDevice *dev)
+{
+  goodix_cancel_pending_command (dev);
+}
+
 /* ---- GObject class init ---- */
 
 void
@@ -1346,6 +1352,7 @@ fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
   dev_cls->enroll   = dev_enroll;
   dev_cls->verify   = dev_verify_identify;
   dev_cls->identify = dev_verify_identify;
+  dev_cls->cancel   = dev_cancel;
 }
 
 void

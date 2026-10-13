@@ -89,6 +89,20 @@ goodix_receive_done(FpDevice *dev, guint8 *data, guint16 length, GError *error)
     callback(dev, data, length, user_data, error);
 }
 
+void
+goodix_cancel_pending_command(FpDevice *dev)
+{
+  FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(
+      FPI_DEVICE_GOODIXTLS(dev));
+
+  /* Complete the innermost command callback, letting nested SSMs unwind.
+   * A SIGFM worker, when active instead, owns the device cancellable. */
+  if (priv->ack || priv->reply)
+    goodix_receive_done(dev, NULL, 0,
+                        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                            "Fingerprint operation cancelled"));
+}
+
 static void
 goodix_receive_none(FpDevice *dev, guint8 *data, guint16 length, gpointer user_data,
                     GError *error)
@@ -1002,7 +1016,16 @@ tls_handshake_done(FpiSsm *ssm, FpDevice *dev, GError *error)
   if (error)
     {
       fp_err("TLS handshake failed: %s (code: %d)", error->message, error->code);
-      g_error_free(error);
+      FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS(dev);
+      FpiDeviceGoodixTlsPrivate *priv = fpi_device_goodixtls_get_instance_private(self);
+      GoodixCallbackInfo *callback = g_steal_pointer(&priv->tls_ready_callback);
+      if (callback)
+        {
+          ((GoodixNoneCallback)callback->callback)(dev, callback->user_data, error);
+          g_free(callback);
+        }
+      else
+        g_error_free(error);
       return;
     }
   goodix_send_tls_successfully_established(dev, on_tls_successfully_established, NULL);

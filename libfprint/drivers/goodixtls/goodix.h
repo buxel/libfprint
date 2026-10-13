@@ -201,6 +201,9 @@ goodix_dev_deinit(FpDevice *dev, GError **error);
 void
 goodix_reset_state(FpDevice *dev);
 
+void
+goodix_cancel_pending_command(FpDevice *dev);
+
 /* ---- DEV SECTION END ---- */
 
 /* ----------------------------------------------------------------------------- */

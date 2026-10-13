@@ -274,6 +274,17 @@ test_utils = static_library('fprint-test-utils',
     dependencies: libfprint_private_dep,
     install: false)
 
+if 'goodixtls511' in drivers
+    goodixtls_test = executable('test-goodixtls',
+        sources: 'test-goodixtls.c',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers,
+        install: false)
+    test('goodixtls', goodixtls_test,
+        suite: ['unit-tests'],
+        env: envs)
+endif
+
 unit_tests = [
     'fpi-device',
     'fpi-ssm',
