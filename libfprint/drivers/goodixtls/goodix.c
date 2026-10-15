@@ -819,6 +819,20 @@ goodix_send_tls_successfully_established(FpDevice *dev, GoodixNoneCallback callb
 }
 
 void
+goodix_send_wake(FpDevice *dev, GoodixNoneCallback callback, gpointer user_data)
+{
+  GoodixNone payload = {};
+
+  /* Same command as above, but sent before enable_chip and given time to
+   * be ACKed over the plain protocol channel, as the device does after
+   * power-up (observed on Huawei 5110, also documented for the 5125). */
+  goodix_send_protocol(dev, GOODIX_CMD_TLS_SUCCESSFULLY_ESTABLISHED,
+                       (guint8 *)&payload, sizeof(payload), NULL, TRUE, 1000, FALSE,
+                       callback ? goodix_receive_none : NULL,
+                       goodix_make_cb_info (G_CALLBACK (callback), user_data));
+}
+
+void
 goodix_send_read_otp(FpDevice *dev, GoodixDefaultCallback callback, gpointer user_data)
 {
   GoodixNone payload = {};

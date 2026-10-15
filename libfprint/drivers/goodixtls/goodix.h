@@ -167,6 +167,11 @@ void
 goodix_send_tls_successfully_established(FpDevice *dev, GoodixNoneCallback callback,
                                          gpointer user_data);
 
+/* Pre-activation wake (0xd4 with a 2-byte zero payload).  Some Huawei
+ * 51xx units ignore enable_chip after power-up until they receive this. */
+void
+goodix_send_wake(FpDevice *dev, GoodixNoneCallback callback, gpointer user_data);
+
 /* Write a preset PSK to the device.
  * May not work on all firmware versions. */
 void
