@@ -56,6 +56,8 @@ G_DEFINE_TYPE(FpiDeviceGoodixTls511, fpi_device_goodixtls511,
 enum activate_states
 {
   ACTIVATE_READ_AND_NOP,
+  ACTIVATE_WAKE,
+  ACTIVATE_WAKE_NOP,
   ACTIVATE_ENABLE_CHIP,
   ACTIVATE_NOP,
   ACTIVATE_CHECK_FW_VER,
@@ -137,6 +139,20 @@ read_otp_callback(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
 /* Activation state machine                                                   */
 /* -------------------------------------------------------------------------- */
 
+/* The wake is best-effort: units that don't need it may not ACK it, so a
+ * timeout or NACK here must not abort activation. */
+static void
+check_wake(FpDevice *dev, gpointer user_data, GError *error)
+{
+  if (error)
+    {
+      fp_dbg("Wake (0xd4) not acknowledged, continuing: %s", error->message);
+      g_error_free(error);
+    }
+
+  fpi_ssm_next_state(user_data);
+}
+
 static void
 activate_run_state(FpiSsm *ssm, FpDevice *dev)
 {
@@ -146,6 +162,14 @@ activate_run_state(FpiSsm *ssm, FpDevice *dev)
       /* Nop seems to clear the previous command buffer. But we are
        * unable to do so. */
       goodix_start_read_loop(dev);
+      goodix_send_nop(dev, goodixtls5xx_check_none, ssm);
+      break;
+
+    case ACTIVATE_WAKE:
+      goodix_send_wake(dev, check_wake, ssm);
+      break;
+
+    case ACTIVATE_WAKE_NOP:
       goodix_send_nop(dev, goodixtls5xx_check_none, ssm);
       break;
 
