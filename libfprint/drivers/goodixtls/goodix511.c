@@ -140,9 +140,21 @@ read_otp_callback(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
 static void
 activate_run_state(FpiSsm *ssm, FpDevice *dev)
 {
+  goodixtls5xx_set_active_ssm (dev, ssm);
   switch (fpi_ssm_get_cur_state(ssm))
     {
     case ACTIVATE_READ_AND_NOP:
+      goodix_tls_clear_device_psk (dev);
+      if (g_usb_device_get_pid (fpi_device_get_usb_device (dev)) == 0x5120)
+        {
+          GError *recovery_error = NULL;
+          goodix_reset_state (dev);
+          if (!goodix_tls_recover_device (dev, &recovery_error))
+            {
+              fpi_ssm_mark_failed (ssm, recovery_error);
+              break;
+            }
+        }
       /* Nop seems to clear the previous command buffer. But we are
        * unable to do so. */
       goodix_start_read_loop(dev);
@@ -150,7 +162,10 @@ activate_run_state(FpiSsm *ssm, FpDevice *dev)
       break;
 
     case ACTIVATE_ENABLE_CHIP:
-      goodix_send_enable_chip(dev, TRUE, goodixtls5xx_check_none, ssm);
+      if (g_usb_device_get_pid (fpi_device_get_usb_device (dev)) == 0x5120)
+        fpi_ssm_next_state (ssm);
+      else
+        goodix_send_enable_chip(dev, TRUE, goodixtls5xx_check_none, ssm);
       break;
 
     case ACTIVATE_NOP:
@@ -185,8 +200,12 @@ activate_run_state(FpiSsm *ssm, FpDevice *dev)
       break;
 
     case ACTIVATE_SET_POWERDOWN_SCAN_FREQUENCY:
-      goodix_send_set_powerdown_scan_frequency(
-          dev, 100, goodixtls5xx_check_powerdown_scan_freq, ssm);
+      if (g_usb_device_get_pid(fpi_device_get_usb_device(dev)) == 0x5120)
+        goodix_send_set_powerdown_scan_frequency_ack_only(
+            dev, 100, goodixtls5xx_check_none, ssm);
+      else
+        goodix_send_set_powerdown_scan_frequency(
+            dev, 100, goodixtls5xx_check_powerdown_scan_freq, ssm);
       break;
     }
 }

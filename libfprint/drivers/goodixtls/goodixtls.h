@@ -52,6 +52,13 @@ typedef struct _GoodixTlsServer
   GByteArray *out_buf; /* encrypted bytes TLS engine → sensor  */
 
   gboolean handshake_done;
+  gboolean handshake_started;
+  gboolean compat_profile;
+  guint8 psk[64];
+  gsize psk_len;
+  gboolean hello_logged;
+  guint8 hello[512]; /* first sensor record, public ClientHello metadata */
+  gsize hello_len;
 } GoodixTlsServer;
 
 /**
@@ -59,7 +66,7 @@ typedef struct _GoodixTlsServer
  * @self:  context to initialise (already allocated by caller)
  * @error: output error
  *
- * Initialises the GnuTLS session with TLS 1.2 DHE-PSK (32 zero-byte key).
+ * Initialises a per-device GnuTLS session with a zero-key fallback.
  * Returns: %TRUE on success.
  */
 gboolean
@@ -87,7 +94,7 @@ goodix_tls_server_read(GoodixTlsServer *self, guint8 *data, guint32 length,
  *
  * Feeds encrypted data from the sensor into the TLS engine and advances
  * the handshake if it is not yet complete.
- * Returns: @length on success, -1 on handshake error.
+ * Returns: @length on progress or E_AGAIN, the GnuTLS code on terminal error.
  */
 int
 goodix_tls_client_write(GoodixTlsServer *self, guint8 *data, guint16 length);
@@ -114,3 +121,12 @@ goodix_tls_client_read(GoodixTlsServer *self, guint8 *data, guint16 length);
  */
 gboolean
 goodix_tls_server_deinit(GoodixTlsServer *self, GError **error);
+
+/* Select before init; emulation takes precedence over this profile. */
+void goodix_tls_server_set_compat_profile (GoodixTlsServer *self, gboolean compat);
+/* Copy a verified binary TLS key before feeding any handshake bytes. */
+void goodix_tls_server_set_psk (GoodixTlsServer *self, const guint8 *psk, gsize len);
+/* TRUE if @hash is SHA-256 of the zero-key fallback (preset PSK 0xbb020003). */
+gboolean goodix_tls_psk_hash_matches_fallback (const guint8 *hash, gsize len);
+/* Versions and offered suites of a ClientHello record, or NULL if malformed. */
+gchar *goodix_tls_describe_client_hello (const guint8 *record, gsize len);

@@ -29,6 +29,7 @@
 
 #define GOODIX_FLAGS_MSG_PROTOCOL (0xa0)
 #define GOODIX_FLAGS_TLS (0xb0)
+#define GOODIX_FLAGS_MSG_DATA (0xc0)
 
 #define GOODIX_CMD_NOP (0x00)
 #define GOODIX_CMD_MCU_GET_IMAGE (0x20)
@@ -136,8 +137,9 @@ typedef struct __attribute__((__packed__)) _GoodixDefault
 
 typedef struct __attribute__((__packed__)) _GoodixNone
 {
-  guint16 : 16;
+  guint8 reserved[2];
 } GoodixNone;
+G_STATIC_ASSERT (sizeof (GoodixNone) == 2);
 
 guint8
 goodix_calc_checksum(guint8 *data, guint16 length);

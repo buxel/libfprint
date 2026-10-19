@@ -23,6 +23,8 @@
 #define FP_COMPONENT "goodixtls5xx"
 
 #include "drivers/goodixtls/goodix5xx.h"
+#include "drivers/goodixtls/goodix_proto.h"
+#include "drivers/goodixtls/goodixtls.h"
 #include "sigfm.h"
 
 #include <math.h>
@@ -31,6 +33,7 @@
 typedef struct
 {
   GoodixTls5xxPix *calibration_img;
+  gsize            calibration_pixels;
   SigfmImgInfo    *last_sigfm_info;
   FpImage         *last_image;
 
@@ -41,10 +44,45 @@ typedef struct
 
   /* Task SSM (active enroll/verify/identify) */
   FpiSsm          *task_ssm;
+  FpiSsm          *active_ssm;
+  gboolean         sigfm_task_inflight;
+  gboolean         operation_cancelled;
 } FpiDeviceGoodixTls5xxPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(FpiDeviceGoodixTls5xx, fpi_device_goodixtls5xx,
                                     FPI_TYPE_DEVICE_GOODIXTLS)
+
+static gboolean
+goodixtls5xx_frame_geometry (FpDevice *dev, const guint8 *data, guint16 len,
+                             guint *width, gsize *pixels)
+{
+  FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
+  guint pid = g_usb_device_get_pid (fpi_device_get_usb_device (dev));
+  gsize count;
+  guint expected_width = pid == 0x5120 ? 64 : cls->scan_width;
+
+  if (!data || len < 13 || (len - 13) % 6 || !cls->scan_height ||
+      data[0] != GOODIX_CMD_MCU_GET_IMAGE ||
+      ((guint16)data[1] | ((guint16)data[2] << 8)) != len - 3)
+    return FALSE;
+  count = ((gsize)len - 13) / 6 * 4;
+  if (!count || count % cls->scan_height ||
+      count / cls->scan_height != expected_width ||
+      expected_width > cls->scan_width ||
+      count > G_MAXUINT16)
+    return FALSE;
+  *width = expected_width;
+  *pixels = count;
+  return TRUE;
+}
+
+void
+goodixtls5xx_set_active_ssm (FpDevice *dev, FpiSsm *ssm)
+{
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (dev));
+  priv->active_ssm = ssm;
+}
 
 enum CALIBRATION_STAGES
 {
@@ -82,6 +120,8 @@ send_switch_mode(FpDevice *dev, gpointer ssm,
 static void
 on_calibrate_scan(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError *err)
 {
+  guint scan_width;
+  gsize pixels;
   if (err)
     {
       fpi_ssm_mark_failed(ssm, err);
@@ -89,19 +129,29 @@ on_calibrate_scan(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError
     }
   FpiDeviceGoodixTls5xx *self = FPI_DEVICE_GOODIXTLS5XX(dev);
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(self);
-  FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS(self);
-  if (!priv->calibration_img)
+  if (!goodixtls5xx_frame_geometry (dev, data, len, &scan_width, &pixels))
     {
-      priv->calibration_img
-          = g_malloc0(cls->scan_height * cls->scan_width * sizeof(GoodixTls5xxPix));
+      fpi_ssm_mark_failed (ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                                     "Invalid Goodix calibration frame"));
+      return;
     }
+  if (priv->calibration_pixels != pixels)
+    {
+      g_free (priv->calibration_img);
+      priv->calibration_img = NULL;
+      priv->calibration_pixels = 0;
+    }
+  if (!priv->calibration_img)
+    priv->calibration_img = g_new0 (GoodixTls5xxPix, pixels);
   goodixtls5xx_decode_frame(priv->calibration_img, len, data);
+  priv->calibration_pixels = pixels;
 
   fpi_ssm_next_state(ssm);
 }
 static void
 calibrate_run(FpiSsm *ssm, FpDevice *dev)
 {
+  goodixtls5xx_set_active_ssm (dev, ssm);
   switch (fpi_ssm_get_cur_state(ssm))
     {
     case CALIBRATION_STAGE_FDT_UP:
@@ -169,11 +219,18 @@ goodixtls5xx_check_firmware_version(FpDevice *dev, gchar *firmware, gpointer use
 
   if (strncmp(firmware, expected, prefix_len) != 0)
     {
-      g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                  "Incompatible device firmware: \"%s\" (expected prefix \"%.*s\")",
-                  firmware, (int)prefix_len, expected);
-      fpi_ssm_mark_failed(user_data, error);
-      return;
+      if (strncmp(firmware, "GF_ITE_EC_", 10) == 0)
+        {
+          fp_dbg("Accepted ITE EC bridge firmware: \"%s\"", firmware);
+        }
+      else
+        {
+          g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                      "Incompatible device firmware: \"%s\" (expected prefix \"%.*s\")",
+                      firmware, (int)prefix_len, expected);
+          fpi_ssm_mark_failed(user_data, error);
+          return;
+        }
     }
 
   if (strcmp(firmware, expected) != 0)
@@ -183,6 +240,37 @@ goodixtls5xx_check_firmware_version(FpDevice *dev, gchar *firmware, gpointer use
   fpi_ssm_next_state(user_data);
 }
 
+static const guint8 goodix_5120_psk_white_box[102] = {
+  0x19, 0x4d, 0x15, 0x2e, 0xa0, 0x8b, 0xcc, 0xa2, 0xd8, 0x86, 0x53, 0x8b,
+  0xe4, 0xca, 0x6b, 0x15, 0xc6, 0x09, 0x78, 0x48, 0xe5, 0x6c, 0xfb, 0x63,
+  0x41, 0x27, 0x8f, 0x15, 0x37, 0xfb, 0x02, 0x9b, 0x02, 0xff, 0x20, 0x00,
+  0x00, 0x00, 0xae, 0xfe, 0x57, 0x60, 0x7c, 0x64, 0xa6, 0xe6, 0x3b, 0x1f,
+  0x6d, 0x9a, 0x7b, 0x73, 0xf6, 0x16, 0x0c, 0x00, 0xf3, 0xe8, 0x99, 0x25,
+  0x15, 0x99, 0x20, 0x7f, 0xca, 0x15, 0x03, 0xaa, 0x09, 0x8f, 0x5f, 0x9c,
+  0x92, 0xf2, 0xf7, 0xd5, 0x4a, 0x13, 0x83, 0x51, 0x3e, 0x48, 0x77, 0xa4,
+  0x8f, 0x5f, 0xe4, 0x94, 0x69, 0x75, 0xd4, 0x86, 0x47, 0x5e, 0x97, 0x75,
+  0xe0, 0xe0, 0x53, 0x0e, 0xe9, 0xf4,
+};
+
+static void
+goodixtls5xx_check_preset_psk_write (FpDevice *dev, gboolean success,
+                                      gpointer user_data, GError *error)
+{
+  if (error)
+    {
+      fpi_ssm_mark_failed (user_data, error);
+      return;
+    }
+  if (!success)
+    {
+      fpi_ssm_mark_failed (user_data,
+                           g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                                "Failed to provision Goodix PSK"));
+      return;
+    }
+  fpi_ssm_next_state (user_data);
+}
+
 void
 goodixtls5xx_check_preset_psk_read(FpDevice *dev, gboolean success, guint32 flags,
                                    guint8 *psk, guint16 length, gpointer user_data,
@@ -190,28 +278,42 @@ goodixtls5xx_check_preset_psk_read(FpDevice *dev, gboolean success, guint32 flag
 {
   if (error)
     {
+      goodix_tls_clear_device_psk (dev);
       fpi_ssm_mark_failed(user_data, error);
       return;
     }
 
   if (!success)
     {
+      goodix_tls_clear_device_psk (dev);
       g_set_error(&error, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "Failed to read PSK from device");
       fpi_ssm_mark_failed(user_data, error);
       return;
     }
 
-  if (length == 0 || length > 64)
+  if (!psk || length == 0 || length > 64 ||
+      (g_usb_device_get_pid (fpi_device_get_usb_device (dev)) == 0x5120 &&
+       ((flags != 0xbb020003 && flags != 0xbb010003) || length != 32)))
     {
+      goodix_tls_clear_device_psk (dev);
       g_set_error(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                  "Device PSK has invalid length: %u", length);
+                  "Invalid PSK response flags=0x%08x length=%u", flags, length);
       fpi_ssm_mark_failed(user_data, error);
       return;
     }
 
-  g_autofree gchar *psk_str = data_to_str(psk, length);
-  fp_dbg("Device PSK: 0x%s (flags=0x%08x, len=%u)", psk_str, flags, length);
+  goodix_tls_classify_psk_response (dev, flags, psk, length);
+
+  if (g_usb_device_get_pid (fpi_device_get_usb_device (dev)) == 0x5120 &&
+      !goodix_tls_psk_hash_matches_fallback (psk, length))
+    {
+      goodix_send_preset_psk_write (dev, 0xbb010003,
+                                    (guint8 *)goodix_5120_psk_white_box,
+                                    sizeof goodix_5120_psk_white_box, NULL,
+                                    goodixtls5xx_check_preset_psk_write, user_data);
+      return;
+    }
 
   fpi_ssm_next_state(user_data);
 }
@@ -441,9 +543,25 @@ linear_subtract_inplace(GoodixTls5xxPix *src, GoodixTls5xxPix *by, guint16 len)
     }
 }
 
+static guint8 *
+goodixtls5xx_frame_for_crop (const guint8 *frame, guint width,
+                             guint stride, guint height)
+{
+  guint8 *padded;
+
+  if (width == stride)
+    return (guint8 *)frame;
+  padded = g_new0 (guint8, stride * height);
+  for (guint y = 0; y < height; y++)
+    memcpy (padded + y * stride, frame + y * width, width);
+  return padded;
+}
+
 static void
 scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError *err)
 {
+  guint scan_width;
+  gsize pixels;
   if (err)
     {
       fpi_ssm_mark_failed(ssm, err);
@@ -454,11 +572,17 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(self);
   FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS(dev);
 
-  GoodixTls5xxPix *raw_frame
-      = g_malloc0(cls->scan_width * cls->scan_height * sizeof(GoodixTls5xxPix));
+  if (!goodixtls5xx_frame_geometry (dev, data, len, &scan_width, &pixels) ||
+      !priv->calibration_img || priv->calibration_pixels != pixels)
+    {
+      fpi_ssm_mark_failed (ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                                     "Invalid or uncalibrated Goodix frame"));
+      return;
+    }
+
+  GoodixTls5xxPix *raw_frame = g_new0 (GoodixTls5xxPix, pixels);
   goodixtls5xx_decode_frame(raw_frame, len, data);
-  linear_subtract_inplace(raw_frame, priv->calibration_img,
-                          cls->scan_width * cls->scan_height);
+  linear_subtract_inplace(raw_frame, priv->calibration_img, pixels);
 
   /* Raw frame dump for offline A/B testing (debug builds only, env-gated).
    * Usage: FP_SAVE_RAW=/path/to/dir ./img-capture finger.pgm
@@ -470,7 +594,7 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
 
     if (save_dir)
       {
-        int npix = cls->scan_width * cls->scan_height;
+        int npix = pixels;
         char path[256];
 
         /* Save calibration frame once */
@@ -519,12 +643,16 @@ scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
   }
 #endif /* !NDEBUG */
 
-  guint8 *squashed = g_malloc0(cls->scan_height * cls->scan_width);
-  goodixtls5xx_squash_frame_percentile(raw_frame, squashed,
-                                       cls->scan_height * cls->scan_width);
+  guint8 *squashed = g_new0 (guint8, pixels);
+  goodixtls5xx_squash_frame_percentile(raw_frame, squashed, pixels);
   g_free(raw_frame);
-  goodixtls5xx_unsharp_mask_inplace(squashed, cls->scan_width, cls->scan_height);
-  FpImage *img = cls->process_frame(squashed);
+  goodixtls5xx_unsharp_mask_inplace(squashed, scan_width, cls->scan_height);
+  guint8 *frame_for_crop = goodixtls5xx_frame_for_crop (squashed, scan_width,
+                                                          cls->scan_width,
+                                                          cls->scan_height);
+  FpImage *img = cls->process_frame(frame_for_crop);
+  if (frame_for_crop != squashed)
+    g_free (frame_for_crop);
   g_free(squashed);
 
   /* Quality gate: reject frames with insufficient contrast (no finger,
@@ -588,6 +716,7 @@ scan_get_img(FpDevice *dev, FpiSsm *ssm)
 static void
 scan_run_state(FpiSsm *ssm, FpDevice *dev)
 {
+  goodixtls5xx_set_active_ssm (dev, ssm);
   switch (fpi_ssm_get_cur_state(ssm))
     {
     case SCAN_STAGE_QUERY_MCU:
@@ -813,6 +942,17 @@ goodix_sigfm_extract_done (GObject      *source_object,
   GoodixSigfmExtractData *data = g_task_get_task_data (task);
   GError *error = NULL;
 
+  priv->sigfm_task_inflight = FALSE;
+  if (priv->operation_cancelled)
+    {
+      g_task_propagate_boolean (task, &error);
+      g_clear_error (&error);
+      if (priv->task_ssm == ssm)
+        fpi_ssm_mark_failed (ssm, g_error_new_literal (
+          G_IO_ERROR, G_IO_ERROR_CANCELLED, "Fingerprint operation cancelled"));
+      return;
+    }
+
   if (!g_task_propagate_boolean (task, &error))
     {
       if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
@@ -842,6 +982,10 @@ goodix_sigfm_extract (FpDevice *dev, FpImage *image, FpiSsm *ssm)
 {
   GTask *task;
   GoodixSigfmExtractData *data;
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (dev));
+
+  priv->sigfm_task_inflight = TRUE;
 
   data = g_new0 (GoodixSigfmExtractData, 1);
   data->width = image->width;
@@ -1004,6 +1148,8 @@ enroll_run_state (FpiSsm *ssm, FpDevice *dev)
     fpi_device_goodixtls5xx_get_instance_private (self);
   FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
 
+  priv->active_ssm = ssm;
+
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case ENROLL_ACTIVATE:
@@ -1100,6 +1246,7 @@ enroll_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
       g_clear_pointer (&priv->enroll_data, g_ptr_array_unref);
       goodixtls5xx_cleanup (self);
       priv->task_ssm = NULL;
+      priv->active_ssm = NULL;
       return;
     }
 
@@ -1122,6 +1269,7 @@ enroll_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
   g_clear_pointer (&priv->enroll_data, g_ptr_array_unref);
   goodixtls5xx_cleanup (self);
   priv->task_ssm = NULL;
+  priv->active_ssm = NULL;
 }
 
 static void
@@ -1132,6 +1280,8 @@ dev_enroll (FpDevice *dev)
     fpi_device_goodixtls5xx_get_instance_private (self);
 
   priv->enroll_stage = 0;
+  priv->operation_cancelled = FALSE;
+  priv->sigfm_task_inflight = FALSE;
   priv->last_scan = FALSE;
   priv->enroll_data =
     g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
@@ -1162,6 +1312,8 @@ verify_run_state (FpiSsm *ssm, FpDevice *dev)
   FpiDeviceGoodixTls5xxPrivate *priv =
     fpi_device_goodixtls5xx_get_instance_private (self);
   FpiDeviceGoodixTls5xxClass *cls = FPI_DEVICE_GOODIXTLS5XX_GET_CLASS (dev);
+
+  priv->active_ssm = ssm;
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
@@ -1311,6 +1463,7 @@ verify_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   goodixtls5xx_cleanup (self);
   priv->task_ssm = NULL;
+  priv->active_ssm = NULL;
 }
 
 static void
@@ -1321,10 +1474,38 @@ dev_verify_identify (FpDevice *dev)
     fpi_device_goodixtls5xx_get_instance_private (self);
 
   priv->last_scan = FALSE;
+  priv->operation_cancelled = FALSE;
+  priv->sigfm_task_inflight = FALSE;
 
   priv->task_ssm = fpi_ssm_new (dev, verify_run_state,
                                 VERIFY_NUM_STATES);
   fpi_ssm_start (priv->task_ssm, verify_ssm_done);
+}
+
+static void
+dev_cancel (FpDevice *dev)
+{
+  FpiDeviceGoodixTls5xxPrivate *priv =
+    fpi_device_goodixtls5xx_get_instance_private (FPI_DEVICE_GOODIXTLS5XX (dev));
+  GError *error = NULL;
+
+  if (!priv->task_ssm || priv->operation_cancelled)
+    return;
+  priv->operation_cancelled = TRUE;
+  if (goodix_tls_cancel_attempt (dev))
+    return; /* The TLS continuation fails its owning SSM. */
+
+  if (!goodix_tls_cancel_session (dev, &error))
+    {
+      if (error)
+        fp_warn ("TLS cancellation recovery failed: %s", error->message);
+      g_clear_error (&error);
+    }
+  if (priv->sigfm_task_inflight)
+    return; /* Its cancellable completion still owns the SSM. */
+  if (priv->active_ssm)
+    fpi_ssm_mark_failed (priv->active_ssm, g_error_new_literal (
+      G_IO_ERROR, G_IO_ERROR_CANCELLED, "Fingerprint operation cancelled"));
 }
 
 /* ---- GObject class init ---- */
@@ -1346,6 +1527,7 @@ fpi_device_goodixtls5xx_class_init(FpiDeviceGoodixTls5xxClass *self)
   dev_cls->enroll   = dev_enroll;
   dev_cls->verify   = dev_verify_identify;
   dev_cls->identify = dev_verify_identify;
+  dev_cls->cancel   = dev_cancel;
 }
 
 void
@@ -1353,11 +1535,15 @@ fpi_device_goodixtls5xx_init(FpiDeviceGoodixTls5xx *self)
 {
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(self);
   priv->calibration_img = NULL;
+  priv->calibration_pixels = 0;
   priv->last_sigfm_info = NULL;
   priv->last_image = NULL;
   priv->enroll_stage = 0;
   priv->enroll_data = NULL;
   priv->task_ssm = NULL;
+  priv->active_ssm = NULL;
+  priv->sigfm_task_inflight = FALSE;
+  priv->operation_cancelled = FALSE;
 }
 
 void
@@ -1366,6 +1552,7 @@ goodixtls5xx_cleanup(FpiDeviceGoodixTls5xx *dev)
   FpiDeviceGoodixTls5xxPrivate *priv = fpi_device_goodixtls5xx_get_instance_private(dev);
   g_free(priv->calibration_img);
   priv->calibration_img = NULL;
+  priv->calibration_pixels = 0;
   g_clear_pointer(&priv->last_sigfm_info, sigfm_free_info);
   g_clear_object(&priv->last_image);
   g_clear_pointer(&priv->enroll_data, g_ptr_array_unref);

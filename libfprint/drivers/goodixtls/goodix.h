@@ -27,6 +27,9 @@
 /* 1 second USB timeout */
 #define GOODIX_TIMEOUT (1000)
 
+/* Whole TLS handshake guard; the sensor MCU computes (EC)DHE on its own. */
+#define GOODIX_TLS_HANDSHAKE_TIMEOUT (5000)
+
 G_DECLARE_DERIVABLE_TYPE(FpiDeviceGoodixTls, fpi_device_goodixtls, FPI, DEVICE_GOODIXTLS,
                          FpDevice)
 
@@ -135,6 +138,12 @@ goodix_send_set_powerdown_scan_frequency(FpDevice *dev, guint16 powerdown_scan_f
                                          GoodixSuccessCallback callback,
                                          gpointer user_data);
 
+void
+goodix_send_set_powerdown_scan_frequency_ack_only(FpDevice *dev,
+                                                  guint16 powerdown_scan_frequency,
+                                                  GoodixNoneCallback callback,
+                                                  gpointer user_data);
+
 /* Enable or disable the sensor chip. */
 void
 goodix_send_enable_chip(FpDevice *dev, gboolean enable, GoodixNoneCallback callback,
@@ -215,8 +224,20 @@ goodix_tls_init(FpDevice *dev, GoodixNoneCallback callback, gpointer user_data);
 gboolean
 goodix_shutdown_tls(FpDevice *dev, GError **error);
 
+/* Stateless, synchronous 0xd4 write for a 5120 bridge left in TLS mode. */
+gboolean goodix_tls_recover_device (FpDevice *dev, GError **error);
+gboolean goodix_tls_cancel_attempt (FpDevice *dev);
+gboolean goodix_tls_cancel_session (FpDevice *dev, GError **error);
+
 /* Read and decrypt a TLS-encrypted image from the device. */
 void
 goodix_tls_read_image(FpDevice *dev, GoodixImageCallback callback, gpointer user_data);
 
 /* ---- TLS SECTION END ---- */
+
+/* Internal only: a caller must have independently verified the raw TLS key. */
+gboolean goodix_tls_set_device_psk (FpDevice *dev, const guint8 *psk,
+                                    gsize len, gboolean verified, GError **error);
+void goodix_tls_clear_device_psk (FpDevice *dev);
+void goodix_tls_classify_psk_response (FpDevice *dev, guint32 flags,
+                                       const guint8 *psk, guint16 len);

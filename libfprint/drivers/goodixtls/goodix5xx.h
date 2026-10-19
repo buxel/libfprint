@@ -123,6 +123,9 @@ goodixtls5xx_decode_frame(GoodixTls5xxPix *frame, guint32 frame_size,
 void
 goodixtls5xx_init_tls(FpDevice *dev, FpiSsm *ssm);
 
+/* Track the currently running child so cancellation never frees its parent. */
+void goodixtls5xx_set_active_ssm (FpDevice *dev, FpiSsm *ssm);
+
 /* Clean up state after activation (called during deactivation). */
 void
 goodixtls5xx_cleanup(FpiDeviceGoodixTls5xx *dev);
